@@ -11,9 +11,10 @@ class wrapper:
     character = {}
     cooldown = {}
 
-    def __init__(self, account, name, token_file):
+    def __init__(self, account, name, token_file, show_bar=False):
         self.account = account
         self.name = name
+        self.show_bar = show_bar
 
         with open(token_file, "r") as file:
             self.token = file.readline().rstrip()
@@ -66,12 +67,13 @@ class wrapper:
         try:
             seconds = self.cooldown['remaining_seconds']
             reason = self.cooldown['reason']
-            bar = ChargingBar(
-                f"{reason} cooldown ({seconds}s)", max=seconds*10)
-            for i in range(seconds*10):
-                time.sleep(0.1)
-                bar.next()
-            bar.finish()
+            if self.show_bar:
+                bar = ChargingBar(
+                    f"{reason} cooldown ({seconds}s)", max=seconds*10)
+                for _ in range(seconds*10):
+                    time.sleep(0.1)
+                    bar.next()
+                bar.finish()
         except KeyError:
             seconds = 0
 
