@@ -3,7 +3,6 @@ from progress.bar import ChargingBar
 import time
 import requests
 import json
-# from pprint import pprint
 
 
 class wrapper:
@@ -353,19 +352,7 @@ class wrapper:
 
 
 def main():
-    kemika = wrapper("kemika", "kemika", "token")
-    kemika.inventory()
-    while True:
-        text = input(">>> ")
-        if text == 'quit':
-            break
-        elif text == 'clear':
-            system('clear')
-        else:
-            try:
-                exec(text)
-            except SyntaxError:
-                print("syntax error")
+    print("This script does not support being run directly. You should import it into a project and access the functions from there.")
 
 
 if __name__ == "__main__":
