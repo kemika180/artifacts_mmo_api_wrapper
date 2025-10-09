@@ -4,7 +4,6 @@ import time
 import requests
 import json
 
-
 class wrapper:
     token = ''
     name = ''
@@ -272,11 +271,13 @@ class wrapper:
                 print(f"  {item['quantity']:>3} {item['code']}")
             self._wait()
 
-    def get_maps(self, content_type='', content_code=''):
+    def get_maps(self, content_type='', content_code='', hide_blocked_maps=True, layer=''):
         suffix = "/maps"
         data = {
             'content_type': content_type,
-            'content_code': content_code
+            'content_code': content_code,
+            'hide_blocked_maps': hide_blocked_maps,
+            'layer': layer
         }
         response = self._get(suffix, data)
         if response:
@@ -350,10 +351,8 @@ class wrapper:
                 if isinstance(content, dict):
                     print(f"{content['type']}: {content['code']}")
 
-
 def main():
     print("This script does not support being run directly. You should import it into a project and access the functions from there.")
-
 
 if __name__ == "__main__":
     main()
