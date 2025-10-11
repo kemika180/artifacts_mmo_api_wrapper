@@ -38,7 +38,10 @@ class wrapper:
             return False
         else:
             data = response.json()['data']
-            self.character = data['character']
+            if 'characters' in data.keys():
+                self.character = data['characters'][0]
+            else:
+                self.character = data['character']
             self.cooldown = data['cooldown']
             return response
 
@@ -58,6 +61,7 @@ class wrapper:
         }
         response = requests.get(address, headers=header)
         if response.status_code != 200:
+            data = response.json()
             print(f"Error {response.status_code}: {data['error']['message']}")
             return False
         else:
@@ -90,7 +94,7 @@ class wrapper:
         response = self._post(suffix, data)
         if response:
             data = response.json()
-            content = data["data"]["destination"]["content"]
+            content = data["data"]["destination"]["interactions"]["content"]
             print(f"moved to {data['data']['destination']['name']}")
             image_name = f"{data['data']['destination']['skin']}.png"
             image_url = "https://www.artifactsmmo.com/"
@@ -194,15 +198,16 @@ class wrapper:
         if response:
             data = response.json()
             print(f"fight took {data['data']['fight']['turns']} turns")
-            print(f"you earned {data['data']['fight']['xp']} xp", end='')
-            gold = int(data['data']['fight']['gold'])
+            print(f"you earned {data['data']['fight']['characters'][0]['xp']} xp", end='')
+            gold = int(data['data']['fight']['characters'][0]['gold'])
             if gold > 0:
-                print(f" and {data['data']['fight']['gold']} gold")
+                print(f" and {gold} gold")
             else:
                 print()
-            if len(data["data"]["fight"]["drops"]) > 0:
+            drops = data['data']['fight']['characters'][0]['drops']
+            if len(drops) > 0:
                 print("loot:")
-                for item in data["data"]["fight"]["drops"]:
+                for item in drops:
                     print(f"{item['quantity']:>2} {item['code']}")
             self.status(showlocation=False)
             self._wait()
@@ -286,8 +291,8 @@ class wrapper:
             data = response.json()
             return data['data']
 
-    def get_map(self, x, y):
-        suffix = f"/maps/{x}/{y}"
+    def get_map(self, x, y, layer):
+        suffix = f"/maps/{layer}/{x}/{y}"
         response = self._get(suffix)
         if response:
             data = response.json()
@@ -342,9 +347,10 @@ class wrapper:
         if showlocation:
             x = self.character['x']
             y = self.character['y']
-            data = self.get_map(x, y)
+            layer = self.character['layer']
+            data = self.get_map(x, y, layer)
             if data:
-                content = data["content"]
+                content = data["interactions"]["content"]
                 print(f"location: {data['name']} ({x}, {y})")
                 image_url = "https://www.artifactsmmo.com/"
                 image_name = f"{data['skin']}.png"
