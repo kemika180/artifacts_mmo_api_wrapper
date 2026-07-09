@@ -1,4 +1,3 @@
-from os import system, path
 from progress.bar import ChargingBar
 import time
 import requests
@@ -23,12 +22,15 @@ class wrapper:
     cooldown = {}
     last_api_call_time = 0.0
     _CHAR_CACHE_TTL = 1.5  # seconds between automatic character refresh calls
+    _REQUEST_TIMEOUT = 30  # seconds before an API request is aborted
 
-    def __init__(self, account, name, token_file, show_bar=False, base_url="https://api.artifactsmmo.com"):
+    def __init__(self, account, name, token_file, show_bar=False, base_url="https://api.artifactsmmo.com", render_images=True):
         self.account = account
         self.name = name
         self.show_bar = show_bar
         self.base_url = base_url.rstrip("/")
+        self.render_images = render_images
+        self.image_base_url = "https://www.artifactsmmo.com"
 
         with open(token_file, "r") as file:
             self.token = file.readline().rstrip()
@@ -94,7 +96,7 @@ class wrapper:
             retries = 3
             response = None
             for attempt in range(retries):
-                response = requests.post(address, data=data_json, headers=header)
+                response = requests.post(address, data=data_json, headers=header, timeout=self._REQUEST_TIMEOUT)
                 if response.status_code == 429:
                     time.sleep(1.0)
                     continue
@@ -159,7 +161,7 @@ class wrapper:
         # 429 rate limit backoff retry
         retries = 3
         for attempt in range(retries):
-            response = requests.get(address, headers=header)
+            response = requests.get(address, headers=header, timeout=self._REQUEST_TIMEOUT)
             if response.status_code == 429:
                 time.sleep(1.0)
                 continue
@@ -220,6 +222,36 @@ class wrapper:
             return True
         return False
 
+    def _render_map_image(self, skin):
+        """Best-effort inline render of a map skin image in the terminal.
+
+        Fetches the PNG over HTTPS and renders it with textual-image's Rich
+        renderable, which auto-selects the best available protocol (Kitty/TGP,
+        Sixel, or a unicode fallback) — the same library the TUI uses, so
+        there is no external binary or shell involved.
+
+        The rendering deps (rich, textual-image) are imported lazily so this
+        API wrapper stays lightweight for consumers that don't want them.
+        No-ops silently if rendering is disabled, the deps are absent, or the
+        fetch fails — map art is non-essential.
+        """
+        if not self.render_images or not skin:
+            return
+        try:
+            import io
+            from rich.console import Console
+            from textual_image.renderable import Image as RenderableImage
+        except ImportError:
+            return  # optional rendering deps not installed
+        url = f"{self.image_base_url}/images/maps/{skin}.png"
+        try:
+            resp = requests.get(url, timeout=self._REQUEST_TIMEOUT)
+            if resp.status_code != 200:
+                return
+            Console().print(RenderableImage(io.BytesIO(resp.content), width=16, height=8))
+        except requests.RequestException:
+            pass  # network/timeout — art is non-essential
+
     def move(self, x, y):
         self.trigger_action_listeners("move", [x, y])
         suffix = f"my/{self.name}/action/move"
@@ -229,10 +261,7 @@ class wrapper:
             data = response.json()
             content = data["data"]["destination"]["interactions"]["content"]
             print(f"moved to {data['data']['destination']['name']}")
-            image_name = f"{data['data']['destination']['skin']}.png"
-            image_url = "https://artifactsmmo.com/"
-            viu = "viu -w 16 -h 8 -"
-            system(f"curl -s {image_url}images/maps/{image_name} | {viu}")
+            self._render_map_image(data['data']['destination']['skin'])
             if isinstance(content, dict):
                 print(f"{content['type']}: {content['code']}")
             self._wait()
@@ -526,10 +555,7 @@ class wrapper:
             if data:
                 content = data["interactions"]["content"]
                 print(f"location: {data['name']} ({x}, {y})")
-                image_url = "https://www.artifactsmmo.com/"
-                image_name = f"{data['skin']}.png"
-                viu = "viu -w 16 -h 8 -"
-                system(f"curl -s {image_url}images/maps/{image_name} | {viu}")
+                self._render_map_image(data['skin'])
                 if isinstance(content, dict):
                     print(f"{content['type']}: {content['code']}")
 
