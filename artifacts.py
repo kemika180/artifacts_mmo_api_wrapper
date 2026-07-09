@@ -208,22 +208,28 @@ class wrapper:
         wait_handler = getattr(self, "_wait_handler", None)
         if wait_handler:
             wait_handler()
-            return
+        else:
+            try:
+                seconds = self.cooldown['remaining_seconds']
+                reason = self.cooldown['reason']
+                if self.show_bar:
+                    bar = ChargingBar(
+                        f"{reason} cooldown ({seconds}s)", max=seconds*10)
+                    for _ in range(seconds*10):
+                        time.sleep(0.1)
+                        bar.next()
+                    bar.finish()
+                else:
+                    time.sleep(seconds)
+            except KeyError:
+                pass
 
-        try:
-            seconds = self.cooldown['remaining_seconds']
-            reason = self.cooldown['reason']
-            if self.show_bar:
-                bar = ChargingBar(
-                    f"{reason} cooldown ({seconds}s)", max=seconds*10)
-                for _ in range(seconds*10):
-                    time.sleep(0.1)
-                    bar.next()
-                bar.finish()
-            else:
-                time.sleep(seconds)
-        except KeyError:
-            seconds = 0
+        # The cooldown has now elapsed. Mark it consumed so a redundant second
+        # _wait() — the action methods each call _wait() after _post has
+        # already waited — doesn't sleep the same cooldown again. The next
+        # action refreshes self.cooldown from the server response.
+        if isinstance(self.cooldown, dict):
+            self.cooldown['remaining_seconds'] = 0
 
     def update(self, force=False):
         """Refresh character state from the API.
