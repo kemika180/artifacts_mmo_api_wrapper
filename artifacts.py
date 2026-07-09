@@ -5,6 +5,7 @@ import json
 import os
 import logging
 import builtins
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 from .db_cache import DatabaseCache
 
@@ -218,6 +219,27 @@ class wrapper:
         else:
             return response
 
+    def _cooldown_remaining(self) -> float:
+        """Seconds until the current cooldown expires.
+
+        Prefers the server's absolute `expiration` timestamp, which is
+        self-correcting for any latency between receiving the response and
+        actually waiting; falls back to the static `remaining_seconds`.
+        Returns 0.0 when there is no active cooldown.
+        """
+        cd = self.cooldown if isinstance(self.cooldown, dict) else {}
+        expiration = cd.get('expiration')
+        if expiration:
+            try:
+                exp = datetime.fromisoformat(str(expiration).replace('Z', '+00:00'))
+                return max(0.0, (exp - datetime.now(timezone.utc)).total_seconds())
+            except (ValueError, TypeError):
+                pass
+        try:
+            return max(0.0, float(cd.get('remaining_seconds', 0)))
+        except (ValueError, TypeError):
+            return 0.0
+
     def _wait(self):
         if not getattr(self, "auto_wait", True):
             return
@@ -226,20 +248,18 @@ class wrapper:
         if wait_handler:
             wait_handler()
         else:
-            try:
-                seconds = self.cooldown['remaining_seconds']
-                reason = self.cooldown['reason']
+            seconds = self._cooldown_remaining()
+            reason = self.cooldown.get('reason', 'action') if isinstance(self.cooldown, dict) else 'action'
+            if seconds > 0:
                 if self.show_bar:
-                    bar = ChargingBar(
-                        f"{reason} cooldown ({seconds}s)", max=seconds*10)
-                    for _ in range(seconds*10):
+                    ticks = int(seconds * 10)
+                    bar = ChargingBar(f"{reason} cooldown ({int(seconds)}s)", max=ticks)
+                    for _ in range(ticks):
                         time.sleep(0.1)
                         bar.next()
                     bar.finish()
                 else:
                     time.sleep(seconds)
-            except KeyError:
-                pass
 
         # The cooldown has now elapsed. Mark it consumed so a redundant second
         # _wait() — the action methods each call _wait() after _post has
