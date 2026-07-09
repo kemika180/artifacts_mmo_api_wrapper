@@ -1,0 +1,11 @@
+[flake8]
+max-line-length = 120
+# E203 / W503 conflict with common formatters; E501 (long lines) and
+# W291/W293 (trailing whitespace) are ignored per preference.
+extend-ignore = E203, W503, E501, W291, W293
+exclude =
+    .venv,
+    __pycache__,
+    .git,
+    build,
+    dist
