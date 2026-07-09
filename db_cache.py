@@ -1,6 +1,5 @@
 import sqlite3
 import json
-import os
 
 class DatabaseCache:
     def __init__(self, db_path):

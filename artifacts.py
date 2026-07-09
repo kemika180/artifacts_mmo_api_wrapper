@@ -6,7 +6,6 @@ import os
 import logging
 import builtins
 from typing import Any, Callable, Optional
-from requests import Response
 from .db_cache import DatabaseCache
 
 # Library logger. A NullHandler keeps messages silent unless the host app
@@ -754,7 +753,7 @@ class wrapper:
         suffix = f"my/{self.name}/action/transition"
         response = self._post(suffix)
         if response:
-            self._emit(f"transitioned map layer")
+            self._emit("transitioned map layer")
             self._wait()
 
     def delete_item(self, code, quantity=1):
@@ -950,6 +949,34 @@ class wrapper:
         if response:
             return response.json()['data']
         return []
+
+    def _sync_all(self, fetch_page: Callable[..., list], cache_set: Callable[[str, dict], None]) -> None:
+        """Page through fetch_page and cache every entry via cache_set."""
+        page = 1
+        while True:
+            batch = fetch_page(page=page, size=100)
+            if not batch:
+                break
+            for entry in batch:
+                code = entry.get('code')
+                if code:
+                    cache_set(code, entry)
+            if len(batch) < 100:
+                break
+            page += 1
+
+    def sync_resources(self) -> None:
+        """Fetch every resource into the local cache (paged).
+
+        Resources are otherwise only cached on individual get_resource calls,
+        which the app never makes, so the resources table stays empty and
+        drop-based lookups fail. Call this once to populate it.
+        """
+        self._sync_all(self.get_resources, self.cache.set_resource)
+
+    def sync_monsters(self) -> None:
+        """Fetch every monster into the local cache (paged). See sync_resources."""
+        self._sync_all(self.get_monsters, self.cache.set_monster)
 
     def get_tasks_list(self, page=1, size=20):
         """Retrieves available tasks list from Task Master."""
