@@ -114,7 +114,7 @@ class wrapper:
             "Authorization": f"Bearer {self.token}",
         }
         data_json = json.dumps(data)
-        
+
         while True:
             # 429 rate limit backoff retry
             retries = 3
@@ -166,11 +166,11 @@ class wrapper:
                     self.character = data['character']
                 if 'cooldown' in data.keys():
                     self.cooldown = data['cooldown']
-            
+
             # Wait for cooldown to expire if auto_wait is enabled
             if getattr(self, "auto_wait", True):
                 self._wait()
-                
+
             return response
 
     def _get(self, suffix, data={}):
@@ -188,7 +188,7 @@ class wrapper:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.token}",
         }
-        
+
         # 429 rate limit backoff retry
         retries = 3
         response = None
@@ -1055,8 +1055,11 @@ class wrapper:
                 logger.debug("skipping unparseable item row: %s", e)
         return craftables
 
+
 def main():
-    builtins.print("This script does not support being run directly. You should import it into a project and access the functions from there.")
+    builtins.print(
+        "This script does not support being run directly. You should import it into a project and access the functions from there.")
+
 
 if __name__ == "__main__":
     main()
