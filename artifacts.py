@@ -566,6 +566,30 @@ class wrapper:
                 return data
         return None
 
+    def get_all_maps(self, refresh: bool = False) -> list:
+        """Return every map tile (paged from /maps), cached as one blob so
+        callers such as the research screen can search rooms by name/content.
+        Pass refresh=True to bypass the cache.
+        """
+        key = "__all_maps__"
+        if not refresh:
+            cached = self.cache.get_maps(key)
+            if cached is not None:
+                return cached
+        all_maps: list = []
+        page = 1
+        while True:
+            response = self._get("maps", {"page": page, "size": 100})
+            if not response:
+                break
+            data = response.json().get('data', [])
+            all_maps.extend(data)
+            if len(data) < 100:
+                break
+            page += 1
+        self.cache.set_maps(key, all_maps)
+        return all_maps
+
     def get_inventory(self) -> list:
         return self.character['inventory']
 
