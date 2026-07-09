@@ -5,6 +5,8 @@ import json
 import os
 import logging
 import builtins
+from typing import Any, Callable, Optional
+from requests import Response
 from .db_cache import DatabaseCache
 
 # Library logger. A NullHandler keeps messages silent unless the host app
@@ -22,7 +24,22 @@ class wrapper:
     _CHAR_CACHE_TTL = 1.5  # seconds between automatic character refresh calls
     _REQUEST_TIMEOUT = 30  # seconds before an API request is aborted
 
-    def __init__(self, account, name, token_file, show_bar=False, base_url="https://api.artifactsmmo.com", render_images=True, output_cb=None):
+    # Attributes assigned at runtime — in __init__, in methods, or by callers
+    # such as the TUI (see bots.patch_api_for_tui). Declared here so type
+    # checkers recognise them on wrapper instances.
+    last_error: Optional[str] = None
+    _emit: Callable[..., None]
+    action_listeners: list
+    _last_update_time: float
+    _wait_handler: Optional[Callable[[], None]]
+    _tui_stop_event: Any
+    _tui_log_callback: Callable[..., None]
+    _app_update_callback: Optional[Callable[..., None]]
+    _tui_patched: bool
+
+    def __init__(self, account: str, name: str, token_file: str, show_bar: bool = False,
+                 base_url: str = "https://api.artifactsmmo.com", render_images: bool = True,
+                 output_cb: Optional[Callable[..., None]] = None) -> None:
         self.account = account
         self.name = name
         # Output sink for all wrapper messages. Defaults to stdout; callers
@@ -32,8 +49,8 @@ class wrapper:
         # Per-instance state. Previously these were mutable class attributes,
         # so every instance shared the same character/cooldown dict until it
         # happened to reassign them — a latent multi-character aliasing bug.
-        self.character = {}
-        self.cooldown = {}
+        self.character: dict = {}
+        self.cooldown: dict = {}
         self.show_bar = show_bar
         self.base_url = base_url.rstrip("/")
         self.render_images = render_images
@@ -127,16 +144,17 @@ class wrapper:
                     logger.debug("failed to parse 499 cooldown response: %s", e)
             break
 
-        if not response or response.status_code != 200:
+        if response is None:
+            self.last_error = "Error: No response from server"
+            self._emit(self.last_error)
+            return False
+        if response.status_code != 200:
             try:
                 data = response.json()
                 self.last_error = f"Error {response.status_code}: {data['error']['message']}"
                 self._emit(self.last_error)
             except Exception:
-                if response:
-                    self.last_error = f"Error {response.status_code}"
-                else:
-                    self.last_error = "Error: No response"
+                self.last_error = f"Error {response.status_code}"
                 self._emit(self.last_error)
             return False
         else:
@@ -231,7 +249,7 @@ class wrapper:
         if isinstance(self.cooldown, dict):
             self.cooldown['remaining_seconds'] = 0
 
-    def update(self, force=False):
+    def update(self, force: bool = False) -> bool:
         """Refresh character state from the API.
 
         Uses a short TTL cache to avoid hammering the API when conditions
@@ -282,7 +300,7 @@ class wrapper:
         except requests.RequestException:
             pass  # network/timeout — art is non-essential
 
-    def move(self, x, y):
+    def move(self, x: int, y: int) -> None:
         self.trigger_action_listeners("move", [x, y])
         suffix = f"my/{self.name}/action/move"
         data = {"x": x, "y": y}
@@ -346,7 +364,7 @@ class wrapper:
             return bankitems
         return []
 
-    def bank_deposit_item(self, code, number=1):
+    def bank_deposit_item(self, code: str, number: int = 1) -> None:
         self.trigger_action_listeners("bank_deposit_item", [code, number])
         suffix = f"my/{self.name}/action/bank/deposit/item"
         data = [{"code": code, "quantity": number}]
@@ -358,7 +376,7 @@ class wrapper:
             self._emit(f"{itemnum} {itemname} deposited in bank",)
             self._wait()
 
-    def bank_deposit_all(self):
+    def bank_deposit_all(self) -> None:
         self.trigger_action_listeners("bank_deposit_all", [])
         suffix = f"my/{self.name}/action/bank/deposit/item"
         data = []
@@ -378,7 +396,7 @@ class wrapper:
         else:
             self._emit("no items to deposit")
 
-    def bank_withdraw_item(self, code, number=1):
+    def bank_withdraw_item(self, code: str, number: int = 1) -> None:
         self.trigger_action_listeners("bank_withdraw_item", [code, number])
         suffix = f"my/{self.name}/action/bank/withdraw/item"
         data = [{"code": code, "quantity": number}]
@@ -390,7 +408,7 @@ class wrapper:
             self._emit(f"{itemnum} {itemname} withdrawn from the bank",)
             self._wait()
 
-    def crafting(self, code, quantity=1):
+    def crafting(self, code: str, quantity: int = 1) -> None:
         self.trigger_action_listeners("crafting", [code, quantity])
         suffix = f"my/{self.name}/action/crafting"
         data = {"code": code, "quantity": quantity}
@@ -403,7 +421,7 @@ class wrapper:
             self._emit(f"you gained {data['data']['details']['xp']} xp")
             self._wait()
 
-    def fight(self):
+    def fight(self) -> None:
         self.trigger_action_listeners("fight", [])
         suffix = f"my/{self.name}/action/fight"
         response = self._post(suffix)
@@ -424,7 +442,7 @@ class wrapper:
             self.status(showlocation=False)
             self._wait()
 
-    def rest(self):
+    def rest(self) -> None:
         self.trigger_action_listeners("rest", [])
         suffix = f"my/{self.name}/action/rest"
         response = self._post(suffix)
@@ -437,7 +455,7 @@ class wrapper:
                         showlocation=False)
             self._wait()
 
-    def gathering(self):
+    def gathering(self) -> None:
         self.trigger_action_listeners("gathering", [])
         suffix = f"my/{self.name}/action/gathering"
         response = self._post(suffix)
@@ -493,7 +511,8 @@ class wrapper:
                 self._emit(f"  {item['quantity']:>3} {item['code']}")
             self._wait()
 
-    def get_maps(self, content_type='', content_code='', hide_blocked_maps=True, layer=''):
+    def get_maps(self, content_type: str = '', content_code: str = '',
+                 hide_blocked_maps: bool = True, layer: str = '') -> Optional[list]:
         query_key = f"{content_type}:{content_code}:{hide_blocked_maps}:{layer}"
         cached = self.cache.get_maps(query_key)
         if cached is not None:
@@ -513,7 +532,7 @@ class wrapper:
             return data
         return None
 
-    def get_map(self, x, y, layer):
+    def get_map(self, x: int, y: int, layer: str) -> Optional[dict]:
         query_key = f"single:{layer}:{x}:{y}"
         cached = self.cache.get_maps(query_key)
         if cached is not None:
@@ -528,10 +547,10 @@ class wrapper:
                 return data
         return None
 
-    def get_inventory(self):
+    def get_inventory(self) -> list:
         return self.character['inventory']
 
-    def get_inventory_space(self):
+    def get_inventory_space(self) -> int:
         total = self.character['inventory_max_items']
         used = 0
         for item in self.get_inventory():
@@ -589,7 +608,7 @@ class wrapper:
                 if isinstance(content, dict):
                     self._emit(f"{content['type']}: {content['code']}")
 
-    def use_item(self, code, quantity=1):
+    def use_item(self, code: str, quantity: int = 1) -> None:
         self.trigger_action_listeners("use_item", [code, quantity])
         suffix = f"my/{self.name}/action/use"
         data = {"code": code, "quantity": quantity}
@@ -621,7 +640,7 @@ class wrapper:
             self._emit("purchased bank expansion")
             self._wait()
 
-    def buy_npc(self, code, quantity=1):
+    def buy_npc(self, code: str, quantity: int = 1) -> None:
         suffix = f"my/{self.name}/action/npc/buy"
         data = {"code": code, "quantity": quantity}
         response = self._post(suffix, data)
@@ -629,7 +648,7 @@ class wrapper:
             self._emit(f"bought {quantity} {code} from NPC merchant")
             self._wait()
 
-    def sell_npc(self, code, quantity=1):
+    def sell_npc(self, code: str, quantity: int = 1) -> None:
         suffix = f"my/{self.name}/action/npc/sell"
         data = {"code": code, "quantity": quantity}
         response = self._post(suffix, data)
@@ -637,7 +656,7 @@ class wrapper:
             self._emit(f"sold {quantity} {code} to NPC merchant")
             self._wait()
 
-    def recycle_item(self, code, quantity=1):
+    def recycle_item(self, code: str, quantity: int = 1) -> None:
         self.trigger_action_listeners("recycle_item", [code, quantity])
         suffix = f"my/{self.name}/action/recycling"
         data = {"code": code, "quantity": quantity}
@@ -660,7 +679,7 @@ class wrapper:
             self._emit("exchanged task rewards")
             self._wait()
 
-    def trade_task(self, code, quantity=1):
+    def trade_task(self, code: str, quantity: int = 1) -> None:
         suffix = f"my/{self.name}/action/task/trade"
         data = {"code": code, "quantity": quantity}
         response = self._post(suffix, data)
@@ -797,7 +816,7 @@ class wrapper:
             return True
         return False
 
-    def get_item(self, code):
+    def get_item(self, code: str) -> Optional[dict]:
         cached = self.cache.get_item(code)
         if cached:
             return cached
@@ -809,7 +828,7 @@ class wrapper:
             return data
         return None
 
-    def get_craft_recipe(self, code):
+    def get_craft_recipe(self, code: str) -> Optional[dict]:
         item = self.get_item(code)
         if item and item.get('craft'):
             return item['craft']
@@ -848,14 +867,14 @@ class wrapper:
         fake_char['utility2_slot_quantity'] = self.character.get('utility2_slot_quantity', 1)
         return fake_char
 
-    def simulate_self_fight(self, monster_code, iterations=100):
+    def simulate_self_fight(self, monster_code: str, iterations: int = 100) -> Optional[dict]:
         fake_char = self.get_character_as_fake()
         if not fake_char:
             self._emit("Error: No character loaded to simulate.")
             return None
         return self.simulate_fight(monster_code, [fake_char], iterations)
 
-    def get_monster(self, code):
+    def get_monster(self, code: str) -> Optional[dict]:
         """Retrieves details of a specific monster (HP, attack, defense, weakness, drops)."""
         cached = self.cache.get_monster(code)
         if cached:
@@ -868,7 +887,7 @@ class wrapper:
             return data
         return None
 
-    def get_resource(self, code):
+    def get_resource(self, code: str) -> Optional[dict]:
         """Retrieves details of a specific resource (skills required, drop rates)."""
         cached = self.cache.get_resource(code)
         if cached:
