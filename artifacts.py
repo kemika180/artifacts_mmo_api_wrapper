@@ -877,6 +877,18 @@ class wrapper:
             return item['craft']
         return None
 
+    def get_npc_trades_for_item(self, code: str) -> list:
+        """NPC buy/sell offers for an item.
+
+        Returns a list of NPCItemSchema dicts
+        ({code, npc, currency, buy_price, sell_price}); empty if no NPC
+        trades the item.
+        """
+        response = self._get("npcs/items", {"code": code})
+        if response:
+            return response.json().get('data', [])
+        return []
+
     def simulate_fight(self, monster_code, fake_characters, iterations=100):
         suffix = "simulation/fight"
         data = {
