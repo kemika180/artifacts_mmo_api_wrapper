@@ -15,11 +15,9 @@ def print(*args, **kwargs):
         builtins.print(*args, **kwargs)
 
 class wrapper:
-    token = ''
-    name = ''
-    account = ''
-    character = {}
-    cooldown = {}
+    # Deliberately class-level: a global "time of the most recent API call
+    # across all character instances", read by the TUI for idle detection.
+    # Do NOT move this to the instance.
     last_api_call_time = 0.0
     _CHAR_CACHE_TTL = 1.5  # seconds between automatic character refresh calls
     _REQUEST_TIMEOUT = 30  # seconds before an API request is aborted
@@ -27,6 +25,11 @@ class wrapper:
     def __init__(self, account, name, token_file, show_bar=False, base_url="https://api.artifactsmmo.com", render_images=True):
         self.account = account
         self.name = name
+        # Per-instance state. Previously these were mutable class attributes,
+        # so every instance shared the same character/cooldown dict until it
+        # happened to reassign them — a latent multi-character aliasing bug.
+        self.character = {}
+        self.cooldown = {}
         self.show_bar = show_bar
         self.base_url = base_url.rstrip("/")
         self.render_images = render_images
