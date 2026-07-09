@@ -1,8 +1,19 @@
-from os import system
+from os import system, path
 from progress.bar import ChargingBar
 import time
 import requests
 import json
+import os
+import builtins
+from .db_cache import DatabaseCache
+
+_print_handler = None
+
+def print(*args, **kwargs):
+    if _print_handler:
+        _print_handler(*args, **kwargs)
+    else:
+        builtins.print(*args, **kwargs)
 
 class wrapper:
     token = ''
@@ -10,20 +21,66 @@ class wrapper:
     account = ''
     character = {}
     cooldown = {}
+    last_api_call_time = 0.0
+    _CHAR_CACHE_TTL = 1.5  # seconds between automatic character refresh calls
 
-    def __init__(self, account, name, token_file, show_bar=False):
+    def __init__(self, account, name, token_file, show_bar=False, base_url="https://api.artifactsmmo.com"):
         self.account = account
         self.name = name
         self.show_bar = show_bar
+        self.base_url = base_url.rstrip("/")
 
         with open(token_file, "r") as file:
             self.token = file.readline().rstrip()
 
-        self.update()
-        self.status()
+        # Initialize SQLite database cache
+        wrapper_dir = os.path.dirname(os.path.abspath(__file__))
+        db_path = os.path.join(wrapper_dir, "cache.db")
+        self.cache = DatabaseCache(db_path)
+        self._check_version_and_sync()
+        self.activity = "Idle"
+        self.action_listeners = []
+        self.auto_wait = True
 
-    def _post(self, suffix, data={}):
-        base_address = "https://api.artifactsmmo.com"
+        if self.name:
+            if self.update():
+                self.status()
+            else:
+                print(f"Warning: Character '{name}' could not be loaded. It may not exist yet.")
+
+    def register_action_listener(self, callback):
+        """Register a callback to be notified before character actions.
+        Callback signature: callback(action_name: str, args: list)
+        """
+        if not hasattr(self, 'action_listeners'):
+            self.action_listeners = []
+        self.action_listeners.append(callback)
+
+    def trigger_action_listeners(self, action_name, args):
+        if not hasattr(self, 'action_listeners'):
+            self.action_listeners = []
+        for cb in self.action_listeners:
+            try:
+                cb(action_name, args)
+            except Exception:
+                pass
+
+    def _check_version_and_sync(self):
+        """Check server API version and drop tables on game update."""
+        try:
+            response = requests.get(f"{self.base_url}/", headers={"Accept": "application/json"}, timeout=5)
+            if response.status_code == 200:
+                current_ver = response.json().get("data", {}).get("version")
+                if current_ver:
+                    cached_ver = self.cache.get_version()
+                    if cached_ver != current_ver:
+                        self.cache.clear_cache(current_ver)
+        except Exception:
+            pass # Silent fallback to existing cache if offline or timed out
+
+    def _post(self, suffix, data={}, update_character=True):
+        wrapper.last_api_call_time = time.time()
+        base_address = self.base_url
         address = f"{base_address}/{suffix}"
         header = {
             "Accept": "application/json",
@@ -31,22 +88,61 @@ class wrapper:
             "Authorization": f"Bearer {self.token}",
         }
         data_json = json.dumps(data)
-        response = requests.post(address, data=data_json, headers=header)
-        if response.status_code != 200:
-            data = response.json()
-            print(f"Error {response.status_code}: {data['error']['message']}")
+        
+        while True:
+            # 429 rate limit backoff retry
+            retries = 3
+            response = None
+            for attempt in range(retries):
+                response = requests.post(address, data=data_json, headers=header)
+                if response.status_code == 429:
+                    time.sleep(1.0)
+                    continue
+                break
+
+            if response and response.status_code == 499:
+                try:
+                    err_data = response.json().get('error', {}).get('data', {})
+                    if 'cooldown' in err_data:
+                        self.cooldown = err_data['cooldown']
+                        self._wait()
+                        continue
+                except Exception:
+                    pass
+            break
+
+        if not response or response.status_code != 200:
+            try:
+                data = response.json()
+                self.last_error = f"Error {response.status_code}: {data['error']['message']}"
+                print(self.last_error)
+            except Exception:
+                if response:
+                    self.last_error = f"Error {response.status_code}"
+                else:
+                    self.last_error = "Error: No response"
+                print(self.last_error)
             return False
         else:
-            data = response.json()['data']
-            if 'characters' in data.keys():
-                self.character = data['characters'][0]
-            else:
-                self.character = data['character']
-            self.cooldown = data['cooldown']
+            self.last_error = None
+            if update_character:
+                data = response.json()['data']
+                if 'characters' in data.keys():
+                    self.character = data['characters'][0]
+                elif 'character' in data.keys():
+                    self.character = data['character']
+                if 'cooldown' in data.keys():
+                    self.cooldown = data['cooldown']
+            
+            # Wait for cooldown to expire if auto_wait is enabled
+            if getattr(self, "auto_wait", True):
+                self._wait()
+                
             return response
 
     def _get(self, suffix, data={}):
-        base_address = "https://api.artifactsmmo.com"
+        wrapper.last_api_call_time = time.time()
+        base_address = self.base_url
         search_terms = []
         for key in data.keys():
             if data[key] != '':
@@ -59,15 +155,35 @@ class wrapper:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.token}",
         }
-        response = requests.get(address, headers=header)
+        
+        # 429 rate limit backoff retry
+        retries = 3
+        for attempt in range(retries):
+            response = requests.get(address, headers=header)
+            if response.status_code == 429:
+                time.sleep(1.0)
+                continue
+            break
+
         if response.status_code != 200:
-            data = response.json()
-            print(f"Error {response.status_code}: {data['error']['message']}")
+            try:
+                data = response.json()
+                print(f"Error {response.status_code}: {data['error']['message']}")
+            except Exception:
+                print(f"Error {response.status_code}")
             return False
         else:
             return response
 
     def _wait(self):
+        if not getattr(self, "auto_wait", True):
+            return
+
+        wait_handler = getattr(self, "_wait_handler", None)
+        if wait_handler:
+            wait_handler()
+            return
+
         try:
             seconds = self.cooldown['remaining_seconds']
             reason = self.cooldown['reason']
@@ -78,17 +194,34 @@ class wrapper:
                     time.sleep(0.1)
                     bar.next()
                 bar.finish()
+            else:
+                time.sleep(seconds)
         except KeyError:
             seconds = 0
 
-    def update(self):
+    def update(self, force=False):
+        """Refresh character state from the API.
+
+        Uses a short TTL cache to avoid hammering the API when conditions
+        or expressions are evaluated rapidly (e.g. inside a script loop).
+        Pass force=True to bypass the cache and always fetch fresh data.
+        Note: _post() already updates self.character from the action response,
+        so force is rarely needed outside of explicit polling contexts.
+        """
+        now = time.time()
+        if not force and (now - getattr(self, '_last_update_time', 0.0)) < self._CHAR_CACHE_TTL:
+            return bool(self.character)
         suffix = f"characters/{self.name}"
         response = self._get(suffix)
         if response:
             data = response.json()
             self.character = data['data']
+            self._last_update_time = now
+            return True
+        return False
 
     def move(self, x, y):
+        self.trigger_action_listeners("move", [x, y])
         suffix = f"my/{self.name}/action/move"
         data = {"x": x, "y": y}
         response = self._post(suffix, data)
@@ -97,7 +230,7 @@ class wrapper:
             content = data["data"]["destination"]["interactions"]["content"]
             print(f"moved to {data['data']['destination']['name']}")
             image_name = f"{data['data']['destination']['skin']}.png"
-            image_url = "https://www.artifactsmmo.com/"
+            image_url = "https://artifactsmmo.com/"
             viu = "viu -w 16 -h 8 -"
             system(f"curl -s {image_url}images/maps/{image_name} | {viu}")
             if isinstance(content, dict):
@@ -105,26 +238,38 @@ class wrapper:
             self._wait()
 
     def equip(self, code, slot):
+        self.trigger_action_listeners("equip", [code, slot])
         suffix = f"my/{self.name}/action/equip"
-        data = {"code": code, "slot": slot}
+        # API requires a list of items to equip
+        data = [{"code": code, "slot": slot}]
         response = self._post(suffix, data)
         if response:
             data = response.json()
-            itemname = data["data"]["item"]["code"]
-            slotname = data["data"]["slot"]
-            print(f"{itemname} equiped to {slotname}")
+            items = data["data"].get("items", [])
+            if items:
+                itemname = items[0]["item"]["code"]
+                slotname = items[0]["slot"]
+                print(f"{itemname} equiped to {slotname}")
             self._wait()
+            return response
+        return False
 
     def unequip(self, slot):
+        self.trigger_action_listeners("unequip", [slot])
         suffix = f"my/{self.name}/action/unequip"
-        data = {"slot": slot}
+        # API requires a list of items to unequip
+        data = [{"slot": slot}]
         response = self._post(suffix, data)
         if response:
             data = response.json()
-            itemname = data["data"]["item"]["code"]
-            slotname = data["data"]["slot"]
-            print(f"{itemname} unequiped from {slotname} and put in inventory")
+            items = data["data"].get("items", [])
+            if items:
+                itemname = items[0]["item"]["code"]
+                slotname = items[0]["slot"]
+                print(f"{itemname} unequiped from {slotname} and put in inventory")
             self._wait()
+            return response
+        return False
 
     def check_bank(self, page=1):
         suffix = "/my/bank/items"
@@ -139,8 +284,11 @@ class wrapper:
                 print(f"  {item['quantity']:>4} {item['code']}")
             if data['pages'] > 1:
                 print(f"({data['page']}/{data['pages']})")
+            return bankitems
+        return []
 
     def bank_deposit_item(self, code, number=1):
+        self.trigger_action_listeners("bank_deposit_item", [code, number])
         suffix = f"my/{self.name}/action/bank/deposit/item"
         data = [{"code": code, "quantity": number}]
         response = self._post(suffix, data)
@@ -152,6 +300,7 @@ class wrapper:
             self._wait()
 
     def bank_deposit_all(self):
+        self.trigger_action_listeners("bank_deposit_all", [])
         suffix = f"my/{self.name}/action/bank/deposit/item"
         data = []
         for item in self.get_inventory():
@@ -171,6 +320,7 @@ class wrapper:
             print("no items to deposit")
 
     def bank_withdraw_item(self, code, number=1):
+        self.trigger_action_listeners("bank_withdraw_item", [code, number])
         suffix = f"my/{self.name}/action/bank/withdraw/item"
         data = [{"code": code, "quantity": number}]
         response = self._post(suffix, data)
@@ -179,8 +329,10 @@ class wrapper:
             itemnum = data["data"]["items"][0]["quantity"]
             itemname = data["data"]["items"][0]["code"]
             print(f"{itemnum} {itemname} withdrawn from the bank",)
+            self._wait()
 
     def crafting(self, code, quantity=1):
+        self.trigger_action_listeners("crafting", [code, quantity])
         suffix = f"my/{self.name}/action/crafting"
         data = {"code": code, "quantity": quantity}
         response = self._post(suffix, data)
@@ -193,6 +345,7 @@ class wrapper:
             self._wait()
 
     def fight(self):
+        self.trigger_action_listeners("fight", [])
         suffix = f"my/{self.name}/action/fight"
         response = self._post(suffix)
         if response:
@@ -213,6 +366,7 @@ class wrapper:
             self._wait()
 
     def rest(self):
+        self.trigger_action_listeners("rest", [])
         suffix = f"my/{self.name}/action/rest"
         response = self._post(suffix)
         if response:
@@ -225,6 +379,7 @@ class wrapper:
             self._wait()
 
     def gathering(self):
+        self.trigger_action_listeners("gathering", [])
         suffix = f"my/{self.name}/action/gathering"
         response = self._post(suffix)
         if response:
@@ -267,6 +422,7 @@ class wrapper:
         print(f"  {task_progress}/{task_total} {task_verb} {task_code}")
 
     def complete_task(self):
+        self.trigger_action_listeners("complete_task", [])
         suffix = f"my/{self.name}/action/task/complete"
         response = self._post(suffix)
         if response:
@@ -279,6 +435,11 @@ class wrapper:
             self._wait()
 
     def get_maps(self, content_type='', content_code='', hide_blocked_maps=True, layer=''):
+        query_key = f"{content_type}:{content_code}:{hide_blocked_maps}:{layer}"
+        cached = self.cache.get_maps(query_key)
+        if cached is not None:
+            return cached
+
         suffix = "/maps"
         data = {
             'content_type': content_type,
@@ -288,15 +449,25 @@ class wrapper:
         }
         response = self._get(suffix, data)
         if response:
-            data = response.json()
-            return data['data']
+            data = response.json()['data']
+            self.cache.set_maps(query_key, data)
+            return data
+        return None
 
     def get_map(self, x, y, layer):
+        query_key = f"single:{layer}:{x}:{y}"
+        cached = self.cache.get_maps(query_key)
+        if cached is not None:
+            return cached
+
         suffix = f"/maps/{layer}/{x}/{y}"
         response = self._get(suffix)
         if response:
-            data = response.json()
-            return data['data']
+            data = response.json().get('data')
+            if data:
+                self.cache.set_maps(query_key, data)
+                return data
+        return None
 
     def get_inventory(self):
         return self.character['inventory']
@@ -330,6 +501,9 @@ class wrapper:
 
     def status(self, showhp=True, showxp=True,
                showlevel=True, showgold=True, showlocation=True):
+        if not self.character:
+            print("No character data loaded.")
+            return
         hp = self.character['hp']
         max_hp = self.character['max_hp']
         xp = self.character['xp']
@@ -358,6 +532,424 @@ class wrapper:
                 system(f"curl -s {image_url}images/maps/{image_name} | {viu}")
                 if isinstance(content, dict):
                     print(f"{content['type']}: {content['code']}")
+
+    def use_item(self, code, quantity=1):
+        self.trigger_action_listeners("use_item", [code, quantity])
+        suffix = f"my/{self.name}/action/use"
+        data = {"code": code, "quantity": quantity}
+        response = self._post(suffix, data)
+        if response:
+            print(f"used {quantity} {code}")
+            self._wait()
+
+    def bank_deposit_gold(self, quantity):
+        suffix = f"my/{self.name}/action/bank/deposit/gold"
+        data = {"quantity": quantity}
+        response = self._post(suffix, data)
+        if response:
+            print(f"deposited {quantity} gold to bank")
+            self._wait()
+
+    def bank_withdraw_gold(self, quantity):
+        suffix = f"my/{self.name}/action/bank/withdraw/gold"
+        data = {"quantity": quantity}
+        response = self._post(suffix, data)
+        if response:
+            print(f"withdrew {quantity} gold from bank")
+            self._wait()
+
+    def bank_buy_expansion(self):
+        suffix = f"my/{self.name}/action/bank/buy_expansion"
+        response = self._post(suffix)
+        if response:
+            print("purchased bank expansion")
+            self._wait()
+
+    def buy_npc(self, code, quantity=1):
+        suffix = f"my/{self.name}/action/npc/buy"
+        data = {"code": code, "quantity": quantity}
+        response = self._post(suffix, data)
+        if response:
+            print(f"bought {quantity} {code} from NPC merchant")
+            self._wait()
+
+    def sell_npc(self, code, quantity=1):
+        suffix = f"my/{self.name}/action/npc/sell"
+        data = {"code": code, "quantity": quantity}
+        response = self._post(suffix, data)
+        if response:
+            print(f"sold {quantity} {code} to NPC merchant")
+            self._wait()
+
+    def recycle_item(self, code, quantity=1):
+        self.trigger_action_listeners("recycle_item", [code, quantity])
+        suffix = f"my/{self.name}/action/recycling"
+        data = {"code": code, "quantity": quantity}
+        response = self._post(suffix, data)
+        if response:
+            print(f"recycled {quantity} {code}")
+            self._wait()
+
+    def cancel_task(self):
+        suffix = f"my/{self.name}/action/task/cancel"
+        response = self._post(suffix)
+        if response:
+            print("canceled task")
+            self._wait()
+
+    def exchange_task(self):
+        suffix = f"my/{self.name}/action/task/exchange"
+        response = self._post(suffix)
+        if response:
+            print("exchanged task rewards")
+            self._wait()
+
+    def trade_task(self, code, quantity=1):
+        suffix = f"my/{self.name}/action/task/trade"
+        data = {"code": code, "quantity": quantity}
+        response = self._post(suffix, data)
+        if response:
+            print(f"traded task items: {quantity} {code}")
+            self._wait()
+
+    def ge_buy(self, id, quantity):
+        self.trigger_action_listeners("ge_buy", [id, quantity])
+        suffix = f"my/{self.name}/action/grandexchange/buy"
+        data = {"id": id, "quantity": quantity}
+        response = self._post(suffix, data)
+        if response:
+            print(f"purchased {quantity} items from Grand Exchange order {id}")
+            self._wait()
+
+    def ge_create_sell_order(self, code, quantity, price):
+        self.trigger_action_listeners("ge_create_sell_order", [code, quantity, price])
+        suffix = f"my/{self.name}/action/grandexchange/create_sell_order"
+        data = {"code": code, "quantity": quantity, "price": price}
+        response = self._post(suffix, data)
+        if response:
+            print(f"created GE sell order for {quantity} {code} @ {price} gold each")
+            self._wait()
+
+    def ge_create_buy_order(self, code, quantity, price):
+        self.trigger_action_listeners("ge_create_buy_order", [code, quantity, price])
+        suffix = f"my/{self.name}/action/grandexchange/create_buy_order"
+        data = {"code": code, "quantity": quantity, "price": price}
+        response = self._post(suffix, data)
+        if response:
+            print(f"created GE buy order for {quantity} {code} @ {price} gold each")
+            self._wait()
+
+    def ge_cancel_order(self, id):
+        self.trigger_action_listeners("ge_cancel_order", [id])
+        suffix = f"my/{self.name}/action/grandexchange/cancel"
+        data = {"id": id}
+        response = self._post(suffix, data)
+        if response:
+            print(f"canceled GE order {id}")
+            self._wait()
+
+    def change_skin(self, skin):
+        suffix = f"my/{self.name}/action/change_skin"
+        data = {"skin": skin}
+        response = self._post(suffix, data)
+        if response:
+            print(f"changed skin to {skin}")
+            self._wait()
+
+    def give_item(self, character_name, code, quantity):
+        suffix = f"my/{self.name}/action/give/item"
+        data = {
+            "character": character_name,
+            "items": [{"code": code, "quantity": quantity}]
+        }
+        response = self._post(suffix, data)
+        if response:
+            print(f"gave {quantity} {code} to character {character_name}")
+            self._wait()
+
+    def give_gold(self, character_name, quantity):
+        suffix = f"my/{self.name}/action/give/gold"
+        data = {"character": character_name, "quantity": quantity}
+        response = self._post(suffix, data)
+        if response:
+            print(f"gave {quantity} gold to character {character_name}")
+            self._wait()
+
+    def transition_layer(self):
+        suffix = f"my/{self.name}/action/transition"
+        response = self._post(suffix)
+        if response:
+            print(f"transitioned map layer")
+            self._wait()
+
+    def delete_item(self, code, quantity=1):
+        self.trigger_action_listeners("delete_item", [code, quantity])
+        suffix = f"my/{self.name}/action/delete"
+        data = {"code": code, "quantity": quantity}
+        response = self._post(suffix, data)
+        if response:
+            print(f"deleted item: {quantity} {code}")
+            self._wait()
+
+    def get_pending_items(self, page=1, size=50):
+        suffix = "my/pending_items"
+        data = {"page": page, "size": size}
+        response = self._get(suffix, data)
+        if response:
+            return response.json()['data']
+        return []
+
+    def claim_item(self, id):
+        self.trigger_action_listeners("claim_item", [id])
+        suffix = f"my/{self.name}/action/claim_item/{id}"
+        response = self._post(suffix)
+        if response:
+            print(f"claimed pending item: {id}")
+            self._wait()
+
+    def ge_fill(self, id, quantity):
+        self.trigger_action_listeners("ge_fill", [id, quantity])
+        suffix = f"my/{self.name}/action/grandexchange/fill"
+        data = {"id": id, "quantity": quantity}
+        response = self._post(suffix, data)
+        if response:
+            print(f"sold {quantity} items to GE buy order {id}")
+            self._wait()
+
+    def get_my_characters(self):
+        suffix = "my/characters"
+        response = self._get(suffix)
+        if response:
+            return response.json()['data']
+        return []
+
+    def create_character(self, name, skin):
+        suffix = "characters/create"
+        data = {"name": name, "skin": skin}
+        response = self._post(suffix, data, update_character=False)
+        if response:
+            print(f"Character {name} created successfully.")
+            return True
+        return False
+
+    def delete_character(self, name):
+        suffix = "characters/delete"
+        data = {"name": name}
+        response = self._post(suffix, data, update_character=False)
+        if response:
+            print(f"Character {name} deleted successfully.")
+            return True
+        return False
+
+    def get_item(self, code):
+        cached = self.cache.get_item(code)
+        if cached:
+            return cached
+        suffix = f"items/{code}"
+        response = self._get(suffix)
+        if response:
+            data = response.json()['data']
+            self.cache.set_item(code, data)
+            return data
+        return None
+
+    def get_craft_recipe(self, code):
+        item = self.get_item(code)
+        if item and item.get('craft'):
+            return item['craft']
+        return None
+
+    def simulate_fight(self, monster_code, fake_characters, iterations=100):
+        suffix = "simulation/fight"
+        data = {
+            "monster": monster_code,
+            "characters": fake_characters,
+            "iterations": iterations
+        }
+        response = self._post(suffix, data, update_character=False)
+        if response:
+            return response.json()['data']
+        return None
+
+    def get_character_as_fake(self):
+        """Converts the current character stats/gear to a FakeCharacterSchema dictionary."""
+        if not self.character:
+            return None
+        slots = [
+            'weapon_slot', 'shield_slot', 'helmet_slot', 'body_armor_slot',
+            'leg_armor_slot', 'boots_slot', 'ring1_slot', 'ring2_slot',
+            'amulet_slot', 'artifact1_slot', 'artifact2_slot', 'artifact3_slot',
+            'utility1_slot', 'utility2_slot'
+        ]
+        fake_char = {
+            "level": self.character.get('level', 1)
+        }
+        for slot in slots:
+            val = self.character.get(slot)
+            if val:
+                fake_char[slot] = val
+        fake_char['utility1_slot_quantity'] = self.character.get('utility1_slot_quantity', 1)
+        fake_char['utility2_slot_quantity'] = self.character.get('utility2_slot_quantity', 1)
+        return fake_char
+
+    def simulate_self_fight(self, monster_code, iterations=100):
+        fake_char = self.get_character_as_fake()
+        if not fake_char:
+            print("Error: No character loaded to simulate.")
+            return None
+        return self.simulate_fight(monster_code, [fake_char], iterations)
+
+    def get_monster(self, code):
+        """Retrieves details of a specific monster (HP, attack, defense, weakness, drops)."""
+        cached = self.cache.get_monster(code)
+        if cached:
+            return cached
+        suffix = f"monsters/{code}"
+        response = self._get(suffix)
+        if response:
+            data = response.json()['data']
+            self.cache.set_monster(code, data)
+            return data
+        return None
+
+    def get_resource(self, code):
+        """Retrieves details of a specific resource (skills required, drop rates)."""
+        cached = self.cache.get_resource(code)
+        if cached:
+            return cached
+        suffix = f"resources/{code}"
+        response = self._get(suffix)
+        if response:
+            data = response.json()['data']
+            self.cache.set_resource(code, data)
+            return data
+        return None
+
+    def get_active_events(self):
+        """Retrieves currently active world events on the map."""
+        suffix = "events/active"
+        response = self._get(suffix)
+        if response:
+            return response.json()['data']
+        return []
+
+    def get_ge_orders(self, code=None, type=None, page=1, size=20):
+        """Retrieves active Grand Exchange orders with optional filters."""
+        suffix = "grandexchange/orders"
+        data = {
+            "page": page,
+            "size": size
+        }
+        if code:
+            data["code"] = code
+        if type:
+            data["type"] = type
+        response = self._get(suffix, data)
+        if response:
+            return response.json()['data']
+        return []
+
+    def get_items(self, page=1, size=20):
+        """Retrieves a paginated list of all items in the game."""
+        suffix = "items"
+        data = {"page": page, "size": size}
+        response = self._get(suffix, data)
+        if response:
+            return response.json()['data']
+        return []
+
+    def get_monsters(self, page=1, size=20):
+        """Retrieves a paginated list of all monsters in the game."""
+        suffix = "monsters"
+        data = {"page": page, "size": size}
+        response = self._get(suffix, data)
+        if response:
+            return response.json()['data']
+        return []
+
+    def get_resources(self, page=1, size=20):
+        """Retrieves a paginated list of all harvesting resources in the game."""
+        suffix = "resources"
+        data = {"page": page, "size": size}
+        response = self._get(suffix, data)
+        if response:
+            return response.json()['data']
+        return []
+
+    def get_tasks_list(self, page=1, size=20):
+        """Retrieves available tasks list from Task Master."""
+        suffix = "tasks/list"
+        data = {"page": page, "size": size}
+        response = self._get(suffix, data)
+        if response:
+            return response.json()['data']
+        return []
+
+    def get_task_rewards(self, page=1, size=20):
+        """Retrieves the list of possible task rewards."""
+        suffix = "tasks/rewards"
+        data = {"page": page, "size": size}
+        response = self._get(suffix, data)
+        if response:
+            return response.json()['data']
+        return []
+
+    def get_other_character(self, name):
+        """Retrieves information of another player's character."""
+        suffix = f"characters/{name}"
+        response = self._get(suffix)
+        if response:
+            return response.json()['data']
+        return None
+
+    def get_character_leaderboard(self, page=1, size=20):
+        """Retrieves character leaderboards (highest level characters)."""
+        suffix = "leaderboard/characters"
+        data = {"page": page, "size": size}
+        response = self._get(suffix, data)
+        if response:
+            return response.json()['data']
+        return []
+
+    def get_all_craftable_items(self):
+        """Returns a list of all craftable items in the game, syncing from the server if cache is empty."""
+        conn = self.cache._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT COUNT(*) FROM items")
+            count = cursor.fetchone()[0]
+        except Exception:
+            count = 0
+
+        # If cache is nearly empty, sync items from the server
+        if count < 100:
+            page = 1
+            while True:
+                items_page = self.get_items(page=page, size=100)
+                if not items_page:
+                    break
+                for item in items_page:
+                    self.cache.set_item(item['code'], item)
+                if len(items_page) < 100:
+                    break
+                page += 1
+
+        try:
+            cursor.execute("SELECT data FROM items")
+            rows = cursor.fetchall()
+        except Exception:
+            rows = []
+        conn.close()
+
+        craftables = []
+        for row in rows:
+            try:
+                item = json.loads(row[0])
+                if item.get("craft"):
+                    craftables.append(item)
+            except Exception:
+                pass
+        return craftables
 
 def main():
     print("This script does not support being run directly. You should import it into a project and access the functions from there.")

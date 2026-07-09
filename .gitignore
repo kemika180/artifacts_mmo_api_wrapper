@@ -1,0 +1,9 @@
+# Runtime SQLite cache (regenerated from the API on first run)
+cache.db
+
+# Legacy cache directory (superseded by cache.db)
+db/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
