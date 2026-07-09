@@ -383,6 +383,21 @@ class wrapper:
             return bankitems
         return []
 
+    def get_bank_items(self) -> list:
+        """All items in the bank (paginated), without printing to output."""
+        items: list = []
+        page = 1
+        while True:
+            response = self._get("my/bank/items", {"page": page, "size": 100})
+            if not response:
+                break
+            payload = response.json()
+            items.extend(payload.get('data', []))
+            if page >= (payload.get('pages') or 1):
+                break
+            page += 1
+        return items
+
     def bank_deposit_item(self, code: str, number: int = 1) -> None:
         self.trigger_action_listeners("bank_deposit_item", [code, number])
         suffix = f"my/{self.name}/action/bank/deposit/item"
