@@ -3,8 +3,15 @@ import time
 import requests
 import json
 import os
+import logging
 import builtins
 from .db_cache import DatabaseCache
+
+# Library logger. A NullHandler keeps messages silent unless the host app
+# configures logging (the TUI routes this into its log file). Errors that were
+# previously swallowed are now recorded rather than lost.
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 
 class wrapper:
@@ -65,7 +72,7 @@ class wrapper:
             try:
                 cb(action_name, args)
             except Exception:
-                pass
+                logger.warning("action listener failed for %s", action_name, exc_info=True)
 
     def _check_version_and_sync(self):
         """Check server API version and drop tables on game update."""
@@ -77,8 +84,9 @@ class wrapper:
                     cached_ver = self.cache.get_version()
                     if cached_ver != current_ver:
                         self.cache.clear_cache(current_ver)
-        except Exception:
-            pass # Silent fallback to existing cache if offline or timed out
+        except Exception as e:
+            # Expected when offline or the API is slow — fall back to the cache.
+            logger.debug("version check/sync skipped: %s", e)
 
     def _post(self, suffix, data={}, update_character=True):
         wrapper.last_api_call_time = time.time()
@@ -96,7 +104,13 @@ class wrapper:
             retries = 3
             response = None
             for attempt in range(retries):
-                response = requests.post(address, data=data_json, headers=header, timeout=self._REQUEST_TIMEOUT)
+                try:
+                    response = requests.post(address, data=data_json, headers=header, timeout=self._REQUEST_TIMEOUT)
+                except requests.RequestException as e:
+                    logger.warning("POST %s failed (attempt %d/%d): %s", suffix, attempt + 1, retries, e)
+                    response = None
+                    time.sleep(1.0)
+                    continue
                 if response.status_code == 429:
                     time.sleep(1.0)
                     continue
@@ -109,8 +123,8 @@ class wrapper:
                         self.cooldown = err_data['cooldown']
                         self._wait()
                         continue
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("failed to parse 499 cooldown response: %s", e)
             break
 
         if not response or response.status_code != 200:
@@ -160,13 +174,23 @@ class wrapper:
         
         # 429 rate limit backoff retry
         retries = 3
+        response = None
         for attempt in range(retries):
-            response = requests.get(address, headers=header, timeout=self._REQUEST_TIMEOUT)
+            try:
+                response = requests.get(address, headers=header, timeout=self._REQUEST_TIMEOUT)
+            except requests.RequestException as e:
+                logger.warning("GET %s failed (attempt %d/%d): %s", suffix, attempt + 1, retries, e)
+                response = None
+                time.sleep(1.0)
+                continue
             if response.status_code == 429:
                 time.sleep(1.0)
                 continue
             break
 
+        if response is None:
+            self._emit("Error: No response from server")
+            return False
         if response.status_code != 200:
             try:
                 data = response.json()
@@ -944,7 +968,8 @@ class wrapper:
         try:
             cursor.execute("SELECT COUNT(*) FROM items")
             count = cursor.fetchone()[0]
-        except Exception:
+        except Exception as e:
+            logger.debug("items count query failed: %s", e)
             count = 0
 
         # If cache is nearly empty, sync items from the server
@@ -963,7 +988,8 @@ class wrapper:
         try:
             cursor.execute("SELECT data FROM items")
             rows = cursor.fetchall()
-        except Exception:
+        except Exception as e:
+            logger.debug("items fetch query failed: %s", e)
             rows = []
         conn.close()
 
@@ -973,8 +999,8 @@ class wrapper:
                 item = json.loads(row[0])
                 if item.get("craft"):
                     craftables.append(item)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("skipping unparseable item row: %s", e)
         return craftables
 
 def main():
