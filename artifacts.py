@@ -6,13 +6,6 @@ import os
 import builtins
 from .db_cache import DatabaseCache
 
-_print_handler = None
-
-def print(*args, **kwargs):
-    if _print_handler:
-        _print_handler(*args, **kwargs)
-    else:
-        builtins.print(*args, **kwargs)
 
 class wrapper:
     # Deliberately class-level: a global "time of the most recent API call
@@ -22,9 +15,13 @@ class wrapper:
     _CHAR_CACHE_TTL = 1.5  # seconds between automatic character refresh calls
     _REQUEST_TIMEOUT = 30  # seconds before an API request is aborted
 
-    def __init__(self, account, name, token_file, show_bar=False, base_url="https://api.artifactsmmo.com", render_images=True):
+    def __init__(self, account, name, token_file, show_bar=False, base_url="https://api.artifactsmmo.com", render_images=True, output_cb=None):
         self.account = account
         self.name = name
+        # Output sink for all wrapper messages. Defaults to stdout; callers
+        # (e.g. the TUI) inject a per-character callback so concurrent bots'
+        # log lines can be attributed and routed independently.
+        self._emit = output_cb if output_cb is not None else builtins.print
         # Per-instance state. Previously these were mutable class attributes,
         # so every instance shared the same character/cooldown dict until it
         # happened to reassign them — a latent multi-character aliasing bug.
@@ -51,7 +48,7 @@ class wrapper:
             if self.update():
                 self.status()
             else:
-                print(f"Warning: Character '{name}' could not be loaded. It may not exist yet.")
+                self._emit(f"Warning: Character '{name}' could not be loaded. It may not exist yet.")
 
     def register_action_listener(self, callback):
         """Register a callback to be notified before character actions.
@@ -120,13 +117,13 @@ class wrapper:
             try:
                 data = response.json()
                 self.last_error = f"Error {response.status_code}: {data['error']['message']}"
-                print(self.last_error)
+                self._emit(self.last_error)
             except Exception:
                 if response:
                     self.last_error = f"Error {response.status_code}"
                 else:
                     self.last_error = "Error: No response"
-                print(self.last_error)
+                self._emit(self.last_error)
             return False
         else:
             self.last_error = None
@@ -173,9 +170,9 @@ class wrapper:
         if response.status_code != 200:
             try:
                 data = response.json()
-                print(f"Error {response.status_code}: {data['error']['message']}")
+                self._emit(f"Error {response.status_code}: {data['error']['message']}")
             except Exception:
-                print(f"Error {response.status_code}")
+                self._emit(f"Error {response.status_code}")
             return False
         else:
             return response
@@ -263,10 +260,10 @@ class wrapper:
         if response:
             data = response.json()
             content = data["data"]["destination"]["interactions"]["content"]
-            print(f"moved to {data['data']['destination']['name']}")
+            self._emit(f"moved to {data['data']['destination']['name']}")
             self._render_map_image(data['data']['destination']['skin'])
             if isinstance(content, dict):
-                print(f"{content['type']}: {content['code']}")
+                self._emit(f"{content['type']}: {content['code']}")
             self._wait()
 
     def equip(self, code, slot):
@@ -281,7 +278,7 @@ class wrapper:
             if items:
                 itemname = items[0]["item"]["code"]
                 slotname = items[0]["slot"]
-                print(f"{itemname} equiped to {slotname}")
+                self._emit(f"{itemname} equiped to {slotname}")
             self._wait()
             return response
         return False
@@ -298,7 +295,7 @@ class wrapper:
             if items:
                 itemname = items[0]["item"]["code"]
                 slotname = items[0]["slot"]
-                print(f"{itemname} unequiped from {slotname} and put in inventory")
+                self._emit(f"{itemname} unequiped from {slotname} and put in inventory")
             self._wait()
             return response
         return False
@@ -311,11 +308,11 @@ class wrapper:
         if response:
             data = response.json()
             bankitems = data["data"]
-            print("Bank contents:")
+            self._emit("Bank contents:")
             for item in bankitems:
-                print(f"  {item['quantity']:>4} {item['code']}")
+                self._emit(f"  {item['quantity']:>4} {item['code']}")
             if data['pages'] > 1:
-                print(f"({data['page']}/{data['pages']})")
+                self._emit(f"({data['page']}/{data['pages']})")
             return bankitems
         return []
 
@@ -328,7 +325,7 @@ class wrapper:
             data = response.json()
             itemnum = data["data"]["items"][0]["quantity"]
             itemname = data["data"]["items"][0]["code"]
-            print(f"{itemnum} {itemname} deposited in bank",)
+            self._emit(f"{itemnum} {itemname} deposited in bank",)
             self._wait()
 
     def bank_deposit_all(self):
@@ -344,12 +341,12 @@ class wrapper:
             if response:
                 data = response.json()
                 items = data["data"]["items"]
-                print("deposited:")
+                self._emit("deposited:")
                 for item in items:
-                    print(f"  {item['quantity']:>4} {item['code']}",)
+                    self._emit(f"  {item['quantity']:>4} {item['code']}",)
                 self._wait()
         else:
-            print("no items to deposit")
+            self._emit("no items to deposit")
 
     def bank_withdraw_item(self, code, number=1):
         self.trigger_action_listeners("bank_withdraw_item", [code, number])
@@ -360,7 +357,7 @@ class wrapper:
             data = response.json()
             itemnum = data["data"]["items"][0]["quantity"]
             itemname = data["data"]["items"][0]["code"]
-            print(f"{itemnum} {itemname} withdrawn from the bank",)
+            self._emit(f"{itemnum} {itemname} withdrawn from the bank",)
             self._wait()
 
     def crafting(self, code, quantity=1):
@@ -370,10 +367,10 @@ class wrapper:
         response = self._post(suffix, data)
         if response:
             data = response.json()
-            print("you crafted:")
+            self._emit("you crafted:")
             for item in data["data"]["details"]["items"]:
-                print(f"{item['quantity']} {item['code']}")
-            print(f"you gained {data['data']['details']['xp']} xp")
+                self._emit(f"{item['quantity']} {item['code']}")
+            self._emit(f"you gained {data['data']['details']['xp']} xp")
             self._wait()
 
     def fight(self):
@@ -382,18 +379,18 @@ class wrapper:
         response = self._post(suffix)
         if response:
             data = response.json()
-            print(f"fight took {data['data']['fight']['turns']} turns")
-            print(f"you earned {data['data']['fight']['characters'][0]['xp']} xp", end='')
+            self._emit(f"fight took {data['data']['fight']['turns']} turns")
+            self._emit(f"you earned {data['data']['fight']['characters'][0]['xp']} xp", end='')
             gold = int(data['data']['fight']['characters'][0]['gold'])
             if gold > 0:
-                print(f" and {gold} gold")
+                self._emit(f" and {gold} gold")
             else:
-                print()
+                self._emit()
             drops = data['data']['fight']['characters'][0]['drops']
             if len(drops) > 0:
-                print("loot:")
+                self._emit("loot:")
                 for item in drops:
-                    print(f"{item['quantity']:>2} {item['code']}")
+                    self._emit(f"{item['quantity']:>2} {item['code']}")
             self.status(showlocation=False)
             self._wait()
 
@@ -403,7 +400,7 @@ class wrapper:
         response = self._post(suffix)
         if response:
             data = response.json()
-            print(f"you rested, healing {data['data']['hp_restored']} hp")
+            self._emit(f"you rested, healing {data['data']['hp_restored']} hp")
             self.status(showxp=False,
                         showlevel=False,
                         showgold=False,
@@ -416,29 +413,29 @@ class wrapper:
         response = self._post(suffix)
         if response:
             data = response.json()
-            print("you gathered:")
+            self._emit("you gathered:")
             for item in data["data"]["details"]["items"]:
-                print(f"{item['quantity']:>2} {item['code']}")
-            print(f"you gained {data['data']['details']['xp']} xp")
+                self._emit(f"{item['quantity']:>2} {item['code']}")
+            self._emit(f"you gained {data['data']['details']['xp']} xp")
             self._wait()
 
     def new_task(self):
         suffix = f"my/{self.name}/action/task/new"
         response = self._post(suffix)
         if response:
-            print("new task:")
+            self._emit("new task:")
             data = response.json()
             total = data['data']['task']['total']
             code = data['data']['task']['code']
             if data["data"]["task"]["type"] == "monsters":
-                print(f"  kill {total} {code}")
+                self._emit(f"  kill {total} {code}")
             else:
-                print(f"  return {total} {code}")
-            print("reward:")
+                self._emit(f"  return {total} {code}")
+            self._emit("reward:")
             if data['data']['task']['rewards']['gold'] > 0:
-                print(f"  {data['data']['task']['rewards']['gold']:>3} gold")
+                self._emit(f"  {data['data']['task']['rewards']['gold']:>3} gold")
             for item in data['data']['task']['rewards']['items']:
-                print(f"  {item['quantity']:>3} {item['code']}")
+                self._emit(f"  {item['quantity']:>3} {item['code']}")
             self._wait()
 
     def check_task(self):
@@ -450,8 +447,8 @@ class wrapper:
             task_verb = "kill"
         else:
             task_verb = "return"
-        print("current task:")
-        print(f"  {task_progress}/{task_total} {task_verb} {task_code}")
+        self._emit("current task:")
+        self._emit(f"  {task_progress}/{task_total} {task_verb} {task_code}")
 
     def complete_task(self):
         self.trigger_action_listeners("complete_task", [])
@@ -459,11 +456,11 @@ class wrapper:
         response = self._post(suffix)
         if response:
             data = response.json()
-            print("task completed\nreward:")
+            self._emit("task completed\nreward:")
             if data['data']['rewards']['gold'] > 0:
-                print(f"  {data['data']['rewards']['gold']:>3} gold")
+                self._emit(f"  {data['data']['rewards']['gold']:>3} gold")
             for item in data['data']['rewards']['items']:
-                print(f"  {item['quantity']:>3} {item['code']}")
+                self._emit(f"  {item['quantity']:>3} {item['code']}")
             self._wait()
 
     def get_maps(self, content_type='', content_code='', hide_blocked_maps=True, layer=''):
@@ -512,29 +509,29 @@ class wrapper:
         return total - used
 
     def inventory(self):
-        print("Inventory:")
+        self._emit("Inventory:")
         output = True
         if len(self.get_inventory()) > 0:
             for item in self.get_inventory():
                 if item['quantity'] > 0:
                     output = False
-                    print(f"{item['quantity']:>4} {item['code']}")
+                    self._emit(f"{item['quantity']:>4} {item['code']}")
         if output:
-            print("  Nothing")
+            self._emit("  Nothing")
 
     def equipment(self):
-        print("Equipment:")
+        self._emit("Equipment:")
         slots = []
         for key in self.character.keys():
             if '_slot' in key:
                 slots.append(key)
         for slot in slots:
-            print(f"{slot.replace('_slot', ''):>17}: {self.character[slot]}")
+            self._emit(f"{slot.replace('_slot', ''):>17}: {self.character[slot]}")
 
     def status(self, showhp=True, showxp=True,
                showlevel=True, showgold=True, showlocation=True):
         if not self.character:
-            print("No character data loaded.")
+            self._emit("No character data loaded.")
             return
         hp = self.character['hp']
         max_hp = self.character['max_hp']
@@ -543,13 +540,13 @@ class wrapper:
         level = self.character['level']
         gold = self.character['gold']
         if showhp:
-            print(f"hp: {hp}/{max_hp} ({round((100.0*hp)/max_hp, 1)}%)")
+            self._emit(f"hp: {hp}/{max_hp} ({round((100.0*hp)/max_hp, 1)}%)")
         if showxp:
-            print(f"xp: {xp}/{max_xp} ({round((100.0*xp)/max_xp, 1)}%)")
+            self._emit(f"xp: {xp}/{max_xp} ({round((100.0*xp)/max_xp, 1)}%)")
         if showlevel:
-            print(f"level: {level}")
+            self._emit(f"level: {level}")
         if showgold:
-            print(f"gold: {gold}")
+            self._emit(f"gold: {gold}")
         if showlocation:
             x = self.character['x']
             y = self.character['y']
@@ -557,10 +554,10 @@ class wrapper:
             data = self.get_map(x, y, layer)
             if data:
                 content = data["interactions"]["content"]
-                print(f"location: {data['name']} ({x}, {y})")
+                self._emit(f"location: {data['name']} ({x}, {y})")
                 self._render_map_image(data['skin'])
                 if isinstance(content, dict):
-                    print(f"{content['type']}: {content['code']}")
+                    self._emit(f"{content['type']}: {content['code']}")
 
     def use_item(self, code, quantity=1):
         self.trigger_action_listeners("use_item", [code, quantity])
@@ -568,7 +565,7 @@ class wrapper:
         data = {"code": code, "quantity": quantity}
         response = self._post(suffix, data)
         if response:
-            print(f"used {quantity} {code}")
+            self._emit(f"used {quantity} {code}")
             self._wait()
 
     def bank_deposit_gold(self, quantity):
@@ -576,7 +573,7 @@ class wrapper:
         data = {"quantity": quantity}
         response = self._post(suffix, data)
         if response:
-            print(f"deposited {quantity} gold to bank")
+            self._emit(f"deposited {quantity} gold to bank")
             self._wait()
 
     def bank_withdraw_gold(self, quantity):
@@ -584,14 +581,14 @@ class wrapper:
         data = {"quantity": quantity}
         response = self._post(suffix, data)
         if response:
-            print(f"withdrew {quantity} gold from bank")
+            self._emit(f"withdrew {quantity} gold from bank")
             self._wait()
 
     def bank_buy_expansion(self):
         suffix = f"my/{self.name}/action/bank/buy_expansion"
         response = self._post(suffix)
         if response:
-            print("purchased bank expansion")
+            self._emit("purchased bank expansion")
             self._wait()
 
     def buy_npc(self, code, quantity=1):
@@ -599,7 +596,7 @@ class wrapper:
         data = {"code": code, "quantity": quantity}
         response = self._post(suffix, data)
         if response:
-            print(f"bought {quantity} {code} from NPC merchant")
+            self._emit(f"bought {quantity} {code} from NPC merchant")
             self._wait()
 
     def sell_npc(self, code, quantity=1):
@@ -607,7 +604,7 @@ class wrapper:
         data = {"code": code, "quantity": quantity}
         response = self._post(suffix, data)
         if response:
-            print(f"sold {quantity} {code} to NPC merchant")
+            self._emit(f"sold {quantity} {code} to NPC merchant")
             self._wait()
 
     def recycle_item(self, code, quantity=1):
@@ -616,21 +613,21 @@ class wrapper:
         data = {"code": code, "quantity": quantity}
         response = self._post(suffix, data)
         if response:
-            print(f"recycled {quantity} {code}")
+            self._emit(f"recycled {quantity} {code}")
             self._wait()
 
     def cancel_task(self):
         suffix = f"my/{self.name}/action/task/cancel"
         response = self._post(suffix)
         if response:
-            print("canceled task")
+            self._emit("canceled task")
             self._wait()
 
     def exchange_task(self):
         suffix = f"my/{self.name}/action/task/exchange"
         response = self._post(suffix)
         if response:
-            print("exchanged task rewards")
+            self._emit("exchanged task rewards")
             self._wait()
 
     def trade_task(self, code, quantity=1):
@@ -638,7 +635,7 @@ class wrapper:
         data = {"code": code, "quantity": quantity}
         response = self._post(suffix, data)
         if response:
-            print(f"traded task items: {quantity} {code}")
+            self._emit(f"traded task items: {quantity} {code}")
             self._wait()
 
     def ge_buy(self, id, quantity):
@@ -647,7 +644,7 @@ class wrapper:
         data = {"id": id, "quantity": quantity}
         response = self._post(suffix, data)
         if response:
-            print(f"purchased {quantity} items from Grand Exchange order {id}")
+            self._emit(f"purchased {quantity} items from Grand Exchange order {id}")
             self._wait()
 
     def ge_create_sell_order(self, code, quantity, price):
@@ -656,7 +653,7 @@ class wrapper:
         data = {"code": code, "quantity": quantity, "price": price}
         response = self._post(suffix, data)
         if response:
-            print(f"created GE sell order for {quantity} {code} @ {price} gold each")
+            self._emit(f"created GE sell order for {quantity} {code} @ {price} gold each")
             self._wait()
 
     def ge_create_buy_order(self, code, quantity, price):
@@ -665,7 +662,7 @@ class wrapper:
         data = {"code": code, "quantity": quantity, "price": price}
         response = self._post(suffix, data)
         if response:
-            print(f"created GE buy order for {quantity} {code} @ {price} gold each")
+            self._emit(f"created GE buy order for {quantity} {code} @ {price} gold each")
             self._wait()
 
     def ge_cancel_order(self, id):
@@ -674,7 +671,7 @@ class wrapper:
         data = {"id": id}
         response = self._post(suffix, data)
         if response:
-            print(f"canceled GE order {id}")
+            self._emit(f"canceled GE order {id}")
             self._wait()
 
     def change_skin(self, skin):
@@ -682,7 +679,7 @@ class wrapper:
         data = {"skin": skin}
         response = self._post(suffix, data)
         if response:
-            print(f"changed skin to {skin}")
+            self._emit(f"changed skin to {skin}")
             self._wait()
 
     def give_item(self, character_name, code, quantity):
@@ -693,7 +690,7 @@ class wrapper:
         }
         response = self._post(suffix, data)
         if response:
-            print(f"gave {quantity} {code} to character {character_name}")
+            self._emit(f"gave {quantity} {code} to character {character_name}")
             self._wait()
 
     def give_gold(self, character_name, quantity):
@@ -701,14 +698,14 @@ class wrapper:
         data = {"character": character_name, "quantity": quantity}
         response = self._post(suffix, data)
         if response:
-            print(f"gave {quantity} gold to character {character_name}")
+            self._emit(f"gave {quantity} gold to character {character_name}")
             self._wait()
 
     def transition_layer(self):
         suffix = f"my/{self.name}/action/transition"
         response = self._post(suffix)
         if response:
-            print(f"transitioned map layer")
+            self._emit(f"transitioned map layer")
             self._wait()
 
     def delete_item(self, code, quantity=1):
@@ -717,7 +714,7 @@ class wrapper:
         data = {"code": code, "quantity": quantity}
         response = self._post(suffix, data)
         if response:
-            print(f"deleted item: {quantity} {code}")
+            self._emit(f"deleted item: {quantity} {code}")
             self._wait()
 
     def get_pending_items(self, page=1, size=50):
@@ -733,7 +730,7 @@ class wrapper:
         suffix = f"my/{self.name}/action/claim_item/{id}"
         response = self._post(suffix)
         if response:
-            print(f"claimed pending item: {id}")
+            self._emit(f"claimed pending item: {id}")
             self._wait()
 
     def ge_fill(self, id, quantity):
@@ -742,7 +739,7 @@ class wrapper:
         data = {"id": id, "quantity": quantity}
         response = self._post(suffix, data)
         if response:
-            print(f"sold {quantity} items to GE buy order {id}")
+            self._emit(f"sold {quantity} items to GE buy order {id}")
             self._wait()
 
     def get_my_characters(self):
@@ -757,7 +754,7 @@ class wrapper:
         data = {"name": name, "skin": skin}
         response = self._post(suffix, data, update_character=False)
         if response:
-            print(f"Character {name} created successfully.")
+            self._emit(f"Character {name} created successfully.")
             return True
         return False
 
@@ -766,7 +763,7 @@ class wrapper:
         data = {"name": name}
         response = self._post(suffix, data, update_character=False)
         if response:
-            print(f"Character {name} deleted successfully.")
+            self._emit(f"Character {name} deleted successfully.")
             return True
         return False
 
@@ -824,7 +821,7 @@ class wrapper:
     def simulate_self_fight(self, monster_code, iterations=100):
         fake_char = self.get_character_as_fake()
         if not fake_char:
-            print("Error: No character loaded to simulate.")
+            self._emit("Error: No character loaded to simulate.")
             return None
         return self.simulate_fight(monster_code, [fake_char], iterations)
 
@@ -981,7 +978,7 @@ class wrapper:
         return craftables
 
 def main():
-    print("This script does not support being run directly. You should import it into a project and access the functions from there.")
+    builtins.print("This script does not support being run directly. You should import it into a project and access the functions from there.")
 
 if __name__ == "__main__":
     main()
