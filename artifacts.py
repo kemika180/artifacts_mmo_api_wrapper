@@ -889,6 +889,21 @@ class wrapper:
             return response.json().get('data', [])
         return []
 
+    def get_events(self) -> list:
+        """The catalog of all possible timed events (EventSchema)."""
+        events: list = []
+        page = 1
+        while True:
+            response = self._get("events", {"page": page, "size": 100})
+            if not response:
+                break
+            data = response.json().get('data', [])
+            events.extend(data)
+            if len(data) < 100:
+                break
+            page += 1
+        return events
+
     def simulate_fight(self, monster_code, fake_characters, iterations=100):
         suffix = "simulation/fight"
         data = {
