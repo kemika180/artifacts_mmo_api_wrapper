@@ -778,6 +778,16 @@ class wrapper:
             self._wait()
 
     def trade_task(self, code: str, quantity: int = 1) -> None:
+        # Defensive clamp: the tasks master rejects a trade that exceeds the
+        # remaining requirement, so never submit more than the task still needs
+        # (task_progress is refreshed from every action response). Only clamps
+        # when trading the active task item and the counts are known, so any
+        # unexpected state falls through to the caller-supplied quantity.
+        cur = self.character if isinstance(self.character, dict) else {}
+        if cur.get('task') == code:
+            remaining = max(0, cur.get('task_total', 0) - cur.get('task_progress', 0))
+            if remaining > 0:
+                quantity = min(quantity, remaining)
         suffix = f"my/{self.name}/action/task/trade"
         data = {"code": code, "quantity": quantity}
         response = self._post(suffix, data)
