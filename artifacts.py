@@ -30,6 +30,7 @@ class wrapper:
     last_error: Optional[str] = None
     _emit: Callable[..., None]
     action_listeners: list
+    _pending_action: Optional[tuple]
     _last_update_time: float
     _wait_handler: Optional[Callable[[], None]]
     _tui_stop_event: Any
@@ -66,6 +67,7 @@ class wrapper:
         self._check_version_and_sync()
         self.activity = "Idle"
         self.action_listeners = []
+        self._pending_action = None
         self.auto_wait = True
 
         if self.name:
@@ -83,6 +85,24 @@ class wrapper:
         self.action_listeners.append(callback)
 
     def trigger_action_listeners(self, action_name, args):
+        # Defer notification until the action is confirmed by a successful API
+        # response (see _fire_pending_action, called from _post). Firing here —
+        # before the POST — would report an action as started even when the
+        # server rejects it (e.g. acting a fraction of a second before the
+        # cooldown has actually expired).
+        self._pending_action = (action_name, args)
+
+    def _fire_pending_action(self):
+        """Notify listeners of the pending action, if any.
+
+        Called from _post once the server has confirmed the action with a 200
+        response, so a rejected action is never reported as started.
+        """
+        pending = getattr(self, '_pending_action', None)
+        self._pending_action = None
+        if not pending:
+            return
+        action_name, args = pending
         if not hasattr(self, 'action_listeners'):
             self.action_listeners = []
         for cb in self.action_listeners:
@@ -90,6 +110,11 @@ class wrapper:
                 cb(action_name, args)
             except Exception:
                 logger.warning("action listener failed for %s", action_name, exc_info=True)
+
+    def _discard_pending_action(self):
+        """Drop a pending action the server rejected, so it is never reported as
+        started and cannot leak into a subsequent request."""
+        self._pending_action = None
 
     def _check_version_and_sync(self):
         """Check server API version and drop tables on game update."""
@@ -147,6 +172,7 @@ class wrapper:
         if response is None:
             self.last_error = "Error: No response from server"
             self._emit(self.last_error)
+            self._discard_pending_action()
             return False
         if response.status_code != 200:
             try:
@@ -156,6 +182,7 @@ class wrapper:
             except Exception:
                 self.last_error = f"Error {response.status_code}"
                 self._emit(self.last_error)
+            self._discard_pending_action()
             return False
         else:
             self.last_error = None
@@ -167,6 +194,10 @@ class wrapper:
                     self.character = data['character']
                 if 'cooldown' in data.keys():
                     self.cooldown = data['cooldown']
+
+            # Action confirmed by the server — only now notify listeners, before
+            # the cooldown wait so they can set the activity shown during it.
+            self._fire_pending_action()
 
             # Wait for cooldown to expire if auto_wait is enabled
             if getattr(self, "auto_wait", True):
