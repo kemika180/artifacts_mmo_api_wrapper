@@ -351,6 +351,15 @@ class wrapper:
             pass  # network/timeout — art is non-essential
 
     def move(self, x: int, y: int) -> None:
+        # Skip the API call when already at the destination: the server rejects a
+        # no-op move with an error, so moving to the current tile just wastes the
+        # request. self.character is refreshed from every action response, so it
+        # reflects the server's last-known position. Only skip on an exact match;
+        # a missing/mismatched position falls through to the normal call.
+        cur = self.character if isinstance(self.character, dict) else {}
+        if cur.get('x') == x and cur.get('y') == y:
+            self._emit(f"already at ({x}, {y})")
+            return
         self.trigger_action_listeners("move", [x, y])
         suffix = f"my/{self.name}/action/move"
         data = {"x": x, "y": y}
