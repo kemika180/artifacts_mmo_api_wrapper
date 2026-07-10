@@ -1,5 +1,6 @@
 from progress.bar import ChargingBar
 import time
+import threading
 import requests
 import json
 import os
@@ -16,13 +17,49 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
+class _RateGate:
+    """Thread-safe minimum-interval gate shared across all wrapper instances.
+
+    Every character authenticates with the same token, so they all draw from a
+    single server-side rate-limit bucket. Throttling therefore has to be global,
+    not per-instance: without it, concurrent bots plus the TUI's own polling
+    burst past the API's limit and earn a flurry of HTTP 429s.
+
+    Each caller reserves a monotonically increasing time slot under the lock,
+    then sleeps until that slot *outside* the lock — so a backlog of threads
+    waits concurrently rather than serializing their sleeps, while requests
+    still hit the wire no closer together than ``min_interval``.
+    """
+
+    def __init__(self, min_interval: float) -> None:
+        self._min_interval = min_interval
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            slot = max(time.monotonic(), self._next_allowed)
+            self._next_allowed = slot + self._min_interval
+        delay = slot - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+
+
 class wrapper:
     # Deliberately class-level: a global "time of the most recent API call
-    # across all character instances", read by the TUI for idle detection.
-    # Do NOT move this to the instance.
+    # across all character instances". Exposed for host apps that want a global
+    # idle signal. Do NOT move this to the instance.
     last_api_call_time = 0.0
     _CHAR_CACHE_TTL = 1.5  # seconds between automatic character refresh calls
     _REQUEST_TIMEOUT = 30  # seconds before an API request is aborted
+
+    # Proactive, process-wide request throttles. Shared (class-level) because
+    # all instances hit the same token bucket. The server allows ~10 req/s for
+    # account/data/action endpoints and ~1 req/s for simulation; we stay a hair
+    # under each to absorb clock jitter and keep 429s from happening at all.
+    _rate_gate = _RateGate(0.13)      # ~7.7 req/s, under the 10 req/s limit
+    _sim_rate_gate = _RateGate(1.1)   # ~0.9 req/s, under the 1 req/s sim limit
+    _MAX_429_RETRIES = 5              # attempts before giving up on a request
 
     # Attributes assigned at runtime — in __init__, in methods, or by callers
     # such as the TUI (see bots.patch_api_for_tui). Declared here so type
@@ -36,6 +73,7 @@ class wrapper:
     _tui_stop_event: Any
     _tui_log_callback: Callable[..., None]
     _app_update_callback: Optional[Callable[..., None]]
+    _bank_update_callback: Optional[Callable[..., None]]
     _tui_patched: bool
 
     def __init__(self, account: str, name: str, token_file: str, show_bar: bool = False,
@@ -52,6 +90,10 @@ class wrapper:
         # happened to reassign them — a latent multi-character aliasing bug.
         self.character: dict = {}
         self.cooldown: dict = {}
+        # Latest bank contents ([{code, quantity}, ...]). The bank item list only
+        # ever changes through a bank action, whose response carries the updated
+        # bank, so this stays authoritative without any dedicated polling.
+        self.bank: list = []
         self.show_bar = show_bar
         self.base_url = base_url.rstrip("/")
         self.render_images = render_images
@@ -130,8 +172,29 @@ class wrapper:
             # Expected when offline or the API is slow — fall back to the cache.
             logger.debug("version check/sync skipped: %s", e)
 
+    @classmethod
+    def _gate_for(cls, suffix: str) -> "_RateGate":
+        """Pick the throttle for an endpoint: simulation has its own 1 req/s
+        bucket, everything else shares the general account/data/action bucket."""
+        if suffix.startswith("simulation"):
+            return cls._sim_rate_gate
+        return cls._rate_gate
+
+    @staticmethod
+    def _retry_after_seconds(response, default: float) -> float:
+        """Seconds to wait after a 429, honouring the server's Retry-After
+        header when present and never dropping below the caller's backoff."""
+        header = response.headers.get("Retry-After") if response is not None else None
+        if header:
+            try:
+                return max(default, float(header))
+            except ValueError:
+                logger.debug("unparseable Retry-After header: %r", header)
+        return default
+
     def _post(self, suffix, data={}, update_character=True):
         wrapper.last_api_call_time = time.time()
+        gate = self._gate_for(suffix)
         base_address = self.base_url
         address = f"{base_address}/{suffix}"
         header = {
@@ -143,9 +206,10 @@ class wrapper:
 
         while True:
             # 429 rate limit backoff retry
-            retries = 3
+            retries = self._MAX_429_RETRIES
             response = None
             for attempt in range(retries):
+                gate.wait()
                 try:
                     response = requests.post(address, data=data_json, headers=header, timeout=self._REQUEST_TIMEOUT)
                 except requests.RequestException as e:
@@ -154,7 +218,10 @@ class wrapper:
                     time.sleep(1.0)
                     continue
                 if response.status_code == 429:
-                    time.sleep(1.0)
+                    backoff = self._retry_after_seconds(response, 0.5 * (2 ** attempt))
+                    logger.warning("POST %s rate limited (attempt %d/%d); backing off %.1fs",
+                                   suffix, attempt + 1, retries, backoff)
+                    time.sleep(backoff)
                     continue
                 break
 
@@ -194,6 +261,16 @@ class wrapper:
                     self.character = data['character']
                 if 'cooldown' in data.keys():
                     self.cooldown = data['cooldown']
+                # Bank actions echo the full updated bank; capture it so hosts
+                # can stay in sync without a separate my/bank/items fetch.
+                if 'bank' in data.keys():
+                    self.bank = data['bank']
+                    cb = getattr(self, '_bank_update_callback', None)
+                    if cb:
+                        try:
+                            cb(self.bank)
+                        except Exception:
+                            logger.warning("bank update callback failed", exc_info=True)
 
             # Action confirmed by the server — only now notify listeners, before
             # the cooldown wait so they can set the activity shown during it.
@@ -222,9 +299,11 @@ class wrapper:
         }
 
         # 429 rate limit backoff retry
-        retries = 3
+        gate = self._gate_for(suffix)
+        retries = self._MAX_429_RETRIES
         response = None
         for attempt in range(retries):
+            gate.wait()
             try:
                 response = requests.get(address, headers=header, timeout=self._REQUEST_TIMEOUT)
             except requests.RequestException as e:
@@ -233,7 +312,10 @@ class wrapper:
                 time.sleep(1.0)
                 continue
             if response.status_code == 429:
-                time.sleep(1.0)
+                backoff = self._retry_after_seconds(response, 0.5 * (2 ** attempt))
+                logger.warning("GET %s rate limited (attempt %d/%d); backing off %.1fs",
+                               suffix, attempt + 1, retries, backoff)
+                time.sleep(backoff)
                 continue
             break
 
