@@ -1234,6 +1234,24 @@ class wrapper:
             return response.json()['data']
         return []
 
+    def get_ge_history(self, code, max_sales=300):
+        """Completed-sale history for an item (grandexchange/history/<code>):
+        list of {seller, buyer, code, quantity, price, sold_at}, oldest-to-newest
+        as returned. Paginates up to `max_sales` records."""
+        sales: list = []
+        page = 1
+        while len(sales) < max_sales:
+            response = self._get(f"grandexchange/history/{code}",
+                                 {"page": page, "size": 100})
+            if not response:
+                break
+            payload = response.json()
+            sales.extend(payload.get('data', []))
+            if page >= (payload.get('pages') or 1):
+                break
+            page += 1
+        return sales[:max_sales]
+
     def get_items(self, page=1, size=20):
         """Retrieves a paginated list of all items in the game."""
         suffix = "items"
