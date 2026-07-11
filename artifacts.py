@@ -1234,23 +1234,38 @@ class wrapper:
             return response.json()['data']
         return []
 
-    def get_ge_history(self, code, max_sales=300):
-        """Completed-sale history for an item (grandexchange/history/<code>):
-        list of {seller, buyer, code, quantity, price, sold_at}, oldest-to-newest
-        as returned. Paginates up to `max_sales` records."""
-        sales: list = []
+    def _paginate(self, suffix, cap, params=None):
+        """Collect up to `cap` records from a paginated GET endpoint (size 100
+        pages). Stops at the last page or when `cap` is reached."""
+        out: list = []
         page = 1
-        while len(sales) < max_sales:
-            response = self._get(f"grandexchange/history/{code}",
-                                 {"page": page, "size": 100})
+        while len(out) < cap:
+            data = dict(params or {})
+            data.update({"page": page, "size": 100})
+            response = self._get(suffix, data)
             if not response:
                 break
             payload = response.json()
-            sales.extend(payload.get('data', []))
+            out.extend(payload.get('data', []))
             if page >= (payload.get('pages') or 1):
                 break
             page += 1
-        return sales[:max_sales]
+        return out[:cap]
+
+    def get_ge_history(self, code, max_sales=300):
+        """Completed-sale history for an item (grandexchange/history/<code>):
+        list of {seller, buyer, code, quantity, price, sold_at}. Paginated."""
+        return self._paginate(f"grandexchange/history/{code}", max_sales)
+
+    def get_my_ge_orders(self, max_orders=200):
+        """This account's active GE orders (my/grandexchange/orders):
+        {id, type, code, quantity, price, created_at}. Paginated."""
+        return self._paginate("my/grandexchange/orders", max_orders)
+
+    def get_my_ge_history(self, max_records=300):
+        """This account's completed GE transactions (my/grandexchange/history):
+        {order_id, seller, buyer, code, quantity, price, sold_at}. Paginated."""
+        return self._paginate("my/grandexchange/history", max_records)
 
     def get_items(self, page=1, size=20):
         """Retrieves a paginated list of all items in the game."""
