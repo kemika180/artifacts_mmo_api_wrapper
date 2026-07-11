@@ -1267,6 +1267,11 @@ class wrapper:
         {order_id, seller, buyer, code, quantity, price, sold_at}. Paginated."""
         return self._paginate("my/grandexchange/history", max_records)
 
+    def get_badges(self, max_badges=300):
+        """The full badge catalogue (badges): {code, season, description}.
+        Paginated."""
+        return self._paginate("badges", max_badges)
+
     def get_items(self, page=1, size=20):
         """Retrieves a paginated list of all items in the game."""
         suffix = "items"
