@@ -50,6 +50,9 @@ class wrapper:
     # across all character instances". Exposed for host apps that want a global
     # idle signal. Do NOT move this to the instance.
     last_api_call_time = 0.0
+    # Latest x-ratelimit-* headers, captured for free off every response (shared,
+    # since the token bucket is account-wide). {period: (remaining, limit)}.
+    last_rates: dict = {}
     _CHAR_CACHE_TTL = 1.5  # seconds between automatic character refresh calls
     _REQUEST_TIMEOUT = 30  # seconds before an API request is aborted
 
@@ -180,6 +183,20 @@ class wrapper:
             return cls._sim_rate_gate
         return cls._rate_gate
 
+    @classmethod
+    def _capture_rates(cls, response) -> None:
+        """Record the x-ratelimit-* headers from a response (present on every
+        reply, incl. 429s) so hosts can show live budget without an extra call."""
+        try:
+            h = response.headers
+            for period in ("second", "minute", "hour"):
+                rem = h.get(f"x-ratelimit-remaining-{period}")
+                lim = h.get(f"x-ratelimit-limit-{period}")
+                if rem is not None and lim is not None:
+                    cls.last_rates[period] = (int(rem), int(lim))
+        except Exception:
+            pass
+
     @staticmethod
     def _retry_after_seconds(response, default: float) -> float:
         """Seconds to wait after a 429, honouring the server's Retry-After
@@ -213,6 +230,7 @@ class wrapper:
                 gate.wait()
                 try:
                     response = requests.post(address, data=data_json, headers=header, timeout=self._REQUEST_TIMEOUT)
+                    wrapper._capture_rates(response)
                 except requests.RequestException as e:
                     logger.warning("POST %s failed (attempt %d/%d): %s", suffix, attempt + 1, retries, e)
                     response = None
@@ -312,6 +330,7 @@ class wrapper:
             gate.wait()
             try:
                 response = requests.get(address, headers=header, timeout=self._REQUEST_TIMEOUT)
+                wrapper._capture_rates(response)
             except requests.RequestException as e:
                 logger.warning("GET %s failed (attempt %d/%d): %s", suffix, attempt + 1, retries, e)
                 response = None
