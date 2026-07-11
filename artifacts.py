@@ -194,6 +194,7 @@ class wrapper:
 
     def _post(self, suffix, data={}, update_character=True):
         wrapper.last_api_call_time = time.time()
+        self.last_action_data = None   # cleared each call; set on success below
         gate = self._gate_for(suffix)
         base_address = self.base_url
         address = f"{base_address}/{suffix}"
@@ -253,8 +254,13 @@ class wrapper:
             return False
         else:
             self.last_error = None
+            payload = response.json()
+            # Stash the last successful action's `data` envelope so callers
+            # (e.g. the v2 script engine) can read an action's result without
+            # every method having to return it.
+            self.last_action_data = payload.get('data')
             if update_character:
-                data = response.json()['data']
+                data = payload['data']
                 if 'characters' in data.keys():
                     self.character = data['characters'][0]
                 elif 'character' in data.keys():
