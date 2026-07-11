@@ -514,6 +514,21 @@ class wrapper:
             return response
         return False
 
+    def get_account_details(self) -> dict:
+        """Account-level details (/my/details): member status + expiration, gems,
+        achievement points, badges, ban state."""
+        response = self._get("my/details")
+        if response:
+            return response.json()['data']
+        return {}
+
+    def get_bank_details(self) -> dict:
+        """Bank summary (/my/bank): slots, expansions, next_expansion_cost, gold."""
+        response = self._get("my/bank")
+        if response:
+            return response.json()['data']
+        return {}
+
     def check_bank(self, page=1):
         suffix = "/my/bank/items"
         data = {'page': page,
