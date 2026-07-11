@@ -529,6 +529,24 @@ class wrapper:
             return response.json()['data']
         return {}
 
+    def get_account_achievements(self, account: str) -> list:
+        """All achievements for an account (paginated), each merged with this
+        account's progress: name, code, description, points, objectives
+        (each with progress/total), rewards, completed_at (or None)."""
+        items: list = []
+        page = 1
+        while True:
+            response = self._get(f"accounts/{account}/achievements",
+                                 {"page": page, "size": 100})
+            if not response:
+                break
+            payload = response.json()
+            items.extend(payload.get('data', []))
+            if page >= (payload.get('pages') or 1):
+                break
+            page += 1
+        return items
+
     def check_bank(self, page=1):
         suffix = "/my/bank/items"
         data = {'page': page,
