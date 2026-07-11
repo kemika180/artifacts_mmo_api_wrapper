@@ -1080,8 +1080,13 @@ class wrapper:
             val = self.character.get(slot)
             if val:
                 fake_char[slot] = val
-        fake_char['utility1_slot_quantity'] = self.character.get('utility1_slot_quantity', 1)
-        fake_char['utility2_slot_quantity'] = self.character.get('utility2_slot_quantity', 1)
+        # The simulator rejects a utility quantity < 1, so only send a quantity
+        # for a slot that actually holds a consumable; an empty slot reports
+        # quantity 0 and would 422 the whole request.
+        for util in ('utility1_slot', 'utility2_slot'):
+            if self.character.get(util):
+                qty_key = f'{util}_quantity'
+                fake_char[qty_key] = max(1, self.character.get(qty_key, 1))
         return fake_char
 
     def simulate_self_fight(self, monster_code: str, iterations: int = 100) -> Optional[dict]:
