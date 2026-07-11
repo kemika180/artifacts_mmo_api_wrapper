@@ -53,6 +53,11 @@ class wrapper:
     # Latest x-ratelimit-* headers, captured for free off every response (shared,
     # since the token bucket is account-wide). {period: (remaining, limit)}.
     last_rates: dict = {}
+    # Passive activity samples for analytics, captured for free off every action
+    # response (character state is echoed by most actions). Shared across all
+    # character instances. {name: [(epoch, total_xp, gold), ...]} ascending time.
+    activity_log: dict = {}
+    _ACTIVITY_CAP = 5000  # per-character sample ceiling (bounded memory)
     _CHAR_CACHE_TTL = 1.5  # seconds between automatic character refresh calls
     _REQUEST_TIMEOUT = 30  # seconds before an API request is aborted
 
@@ -197,6 +202,26 @@ class wrapper:
         except Exception:
             pass
 
+    @classmethod
+    def _record_activity(cls, character) -> None:
+        """Append a timestamped (total_xp, gold) sample for analytics, taken from
+        an action's echoed character state. Free — no extra request. Bounded per
+        character. Silently no-ops on malformed input."""
+        try:
+            name = character.get("name")
+            if not name:
+                return
+            xp = character.get("total_xp")
+            gold = character.get("gold")
+            if xp is None and gold is None:
+                return
+            log = cls.activity_log.setdefault(name, [])
+            log.append((time.time(), int(xp or 0), int(gold or 0)))
+            if len(log) > cls._ACTIVITY_CAP:
+                del log[:len(log) - cls._ACTIVITY_CAP]
+        except Exception:
+            pass
+
     @staticmethod
     def _retry_after_seconds(response, default: float) -> float:
         """Seconds to wait after a 429, honouring the server's Retry-After
@@ -279,10 +304,15 @@ class wrapper:
             self.last_action_data = payload.get('data')
             if update_character:
                 data = payload['data']
+                char_updated = False
                 if 'characters' in data.keys():
                     self.character = data['characters'][0]
+                    char_updated = True
                 elif 'character' in data.keys():
                     self.character = data['character']
+                    char_updated = True
+                if char_updated:
+                    wrapper._record_activity(self.character)
                 if 'cooldown' in data.keys():
                     self.cooldown = data['cooldown']
                 # Bank actions echo the full updated bank; capture it so hosts
