@@ -1252,11 +1252,23 @@ class wrapper:
             return response.json()['data']
         return None
 
-    def get_character_leaderboard(self, page=1, size=20):
-        """Retrieves character leaderboards (highest level characters)."""
-        suffix = "leaderboard/characters"
+    def get_character_leaderboard(self, sort="combat", page=1, size=20):
+        """Character leaderboard ranked by `sort`: 'combat' (overall level) or a
+        skill ('mining', 'woodcutting', 'fishing', 'weaponcrafting',
+        'gearcrafting', 'jewelrycrafting', 'cooking', 'alchemy')."""
+        response = self._get("leaderboard/characters",
+                             {"sort": sort, "page": page, "size": size})
+        if response:
+            return response.json()['data']
+        return []
+
+    def get_account_leaderboard(self, sort="", page=1, size=20):
+        """Account leaderboard (positions with gold + achievement points).
+        `sort` may be '' (default), 'gold', or 'achievements_points'."""
         data = {"page": page, "size": size}
-        response = self._get(suffix, data)
+        if sort:
+            data["sort"] = sort
+        response = self._get("leaderboard/accounts", data)
         if response:
             return response.json()['data']
         return []
